@@ -1,0 +1,364 @@
+# SMH Cryptic Phase round -- SPOK-24, a fictional paramyxovirus, in a fully naive population.
+#
+# Defaults are the stage-0 first best guess (cryptic-round/notebooks/02_first_best_guess.ipynb ->
+# cryptic-round/data/processed/first_best_guess.json). No prior immunity, no vaccination, no
+# seasonality: everything Round 20 carried for COVID history is gone.
+#
+# This file is a Jinja template. The simulator harness renders `import_events` (a library of
+# stochastic importation schedules, cryptic-round/notebooks/importation.py) into scheduled_imports(),
+# and each run picks one schedule with the int config import_schedule_id.
+#
+# Ticks: tick 0 = 2024-09-22 (a Sunday), so 7-tick blocks line up with MMWR weeks ending Saturday.
+#        The calibration window ends 2025-01-18 = tick 118 (run 119 ticks).
+#
+# The contagion is named `spok`, so output datasets are spok/state_count, spok/transitions,
+# spok/interventions. Analysis code keys on that name, never on the number of states: this
+# 7-state layout has the same width as Round 20's 7-state S V E I A H D.
+
+# --- transmission -------------------------------------------------------------------------------
+# Per-tick probability along an edge: baseline_tau * (1 - exp(-cdose * duration)) * infectivity(src)
+# * susceptibility(tgt). R0 ~= baseline_tau * D_eff * lambda (notebook 02 section 3).
+config baseline_tau: float = 0.02439
+# Wells-Riley dose constant (p = 0.9 for a 2-hour contact), unchanged from covid19-r20.esl.
+config cdose: float = 3.198035e-04
+
+# --- natural history ----------------------------------------------------------------------------
+# 20% asymptomatic (severity preprint, Jan 7).
+config p_symptomatic: float = 0.8
+# E is non-infectious in the first guess; the dwell pmfs below were solved for that choice.
+config infectivity_E: float = 0.0
+config infectivity_I: float = 1.0
+config infectivity_A: float = 0.5
+
+# --- susceptibility by age ----------------------------------------------------------------------
+# Relative susceptibility per age band. First guess: 0-17 x0.547, which moves the network's
+# infection age mix onto the observed case mix (notebook 02 section 4). Bands are finer than the
+# severity bands so notebook 04's susceptibility patterns can be expressed directly.
+config sus_0_4: float = 0.547
+config sus_5_11: float = 0.547
+config sus_12_17: float = 0.547
+config sus_18_29: float = 1.0
+config sus_30_49: float = 1.0
+config sus_50_64: float = 1.0
+config sus_65_74: float = 1.0
+config sus_75p: float = 1.0
+
+# --- severity -------------------------------------------------------------------------------------
+# P(hospitalized | symptomatic) = the preprint's symptomatic IHR by age. The preprint reports one
+# 0-17 value; it is split into 0-4 and 5-17 here because the observed admission age mix suggests
+# they differ (cryptic-round notebooks/04_susceptibility_profiles.ipynb).
+config hosp_prob_0_4: float = 0.019
+config hosp_prob_5_17: float = 0.019
+config hosp_prob_18_49: float = 0.005
+config hosp_prob_50_64: float = 0.015
+config hosp_prob_65p: float = 0.201
+config hosp_prob_scale: float = 1.0
+config hosp_prob_65p_scale: float = 1.0
+# High-risk multipliers for ages 18-64; 1.0/1.0 = off (no SPOK-24 source yet).
+config hosp_prob_hr_high: float = 1.0
+config hosp_prob_hr_low: float = 1.0
+# P(death | hospitalized) = preprint IFR / IHR by age.
+config death_prob_0_4: float = 0.01579
+config death_prob_5_17: float = 0.01579
+config death_prob_18_49: float = 0.12
+config death_prob_50_64: float = 0.06667
+config death_prob_65p: float = 0.199
+config death_prob_scale: float = 1.0
+
+# --- importation ----------------------------------------------------------------------------------
+# Which schedule of the rendered library to use (0 = pilot: 10 importations at tick 0).
+config import_schedule_id: int = 0
+# Importations land on susceptible residents of these ages, in gateway counties (major airports)
+# when import_gateway_only = 1. Ints, not bools: the harness passes configs through the
+# environment and the engine has no bool parser.
+config import_min_age: int = 15
+config import_max_age: int = 80
+config import_gateway_only: int = 1
+
+# --- statistics (recorded after intervene() each tick; NOT reset by the engine) -------------------
+statistic new_hosp_count: int = 0
+statistic new_import_count: int = 0
+statistic imports_scheduled: int = 0
+
+enum spok_state_t
+    S, # Susceptible
+    E, # Exposed (incubating)
+    I, # Infectious, symptomatic
+    A, # Infectious, asymptomatic
+    H, # Hospitalized
+    D, # Dead
+    R  # Recovered (immune for the horizon of this round)
+end
+
+# data/person/<LOC>-person.parquet (cryptic-round/scripts/build_person_parquet.py)
+# columns: pid, age, high_risk, county_fips, gateway
+node
+    pid: int node key
+    age: i8 static
+    high_risk: bool static
+    county_fips: i32 static
+    gateway: bool static
+
+    # Book keeping
+    imported: bool
+    counted_admission: bool
+end
+
+edge
+    targetPID: int target node key
+    sourcePID: int source node key
+    duration: int static
+end
+
+def symptomatic_prob(v: node) -> float:
+    return p_symptomatic
+end
+
+def asymptomatic_prob(v: node) -> float:
+    return 1.0 - p_symptomatic
+end
+
+def hosp_prob(v: node) -> float:
+    var p: float = 0.0
+
+    if v.age <= 4:
+        p = hosp_prob_0_4
+    elif v.age <= 17:
+        p = hosp_prob_5_17
+    elif v.age <= 49:
+        p = hosp_prob_18_49
+    elif v.age <= 64:
+        p = hosp_prob_50_64
+    else:
+        p = hosp_prob_65p * hosp_prob_65p_scale
+    end
+
+    if 18 <= v.age and v.age <= 64:
+        if v.high_risk:
+            p *= hosp_prob_hr_high
+        else:
+            p *= hosp_prob_hr_low
+        end
+    end
+
+    p *= hosp_prob_scale
+    if p > 1.0:
+        p = 1.0
+    end
+    return p
+end
+
+def not_hosp_prob(v: node) -> float:
+    return 1.0 - hosp_prob(v)
+end
+
+def death_prob(v: node) -> float:
+    var p: float = 0.0
+
+    if v.age <= 4:
+        p = death_prob_0_4
+    elif v.age <= 17:
+        p = death_prob_5_17
+    elif v.age <= 49:
+        p = death_prob_18_49
+    elif v.age <= 64:
+        p = death_prob_50_64
+    else:
+        p = death_prob_65p
+    end
+
+    p *= death_prob_scale
+    if p > 1.0:
+        p = 1.0
+    end
+    return p
+end
+
+def not_death_prob(v: node) -> float:
+    return 1.0 - death_prob(v)
+end
+
+distribution
+    # incubation: discretized gamma mean 3.00 d, sd 1.04 (NEJM mean 3.0, 2.2-4.2)
+    discrete exposed_dwell_time
+        p = 0.04025731, v = 1
+        p = 0.29777557, v = 2
+        p = 0.38255407, v = 3
+        p = 0.20041756, v = 4
+        p = 0.06230510, v = 5
+        p = 0.01384074, v = 6
+        p = 0.00284965, v = 7
+    end
+
+    # infectious (I and A): mean 4.57 d, solved so the model generation interval = 6.0 d
+    # (NEJM serial interval 6.0, 4.5-7.6). Tail below 1e-5 folded into v = 11.
+    discrete infectious_dwell_time
+        p = 0.00123028, v = 1
+        p = 0.04117656, v = 2
+        p = 0.18429647, v = 3
+        p = 0.29253644, v = 4
+        p = 0.24956561, v = 5
+        p = 0.14167594, v = 6
+        p = 0.06043915, v = 7
+        p = 0.02088320, v = 8
+        p = 0.00613883, v = 9
+        p = 0.00158819, v = 10
+        p = 0.00046930, v = 11
+    end
+
+    # Hospital stay and admission-to-death: inherited from covid19-r20.esl. No SPOK-24 source;
+    # they shape only the H census and death timing, not admissions.
+    discrete hosp_dwell_time
+        p = 0.70, v = 1
+        p = 0.10, v = 2
+        p = 0.09, v = 3
+        p = 0.04, v = 4
+        p = 0.03, v = 5
+        p = 0.02, v = 6
+        p = 0.02, v = 7
+    end
+
+    discrete hosp_to_death
+        p = 0.03, v = 3
+        p = 0.07, v = 4
+        p = 0.12, v = 5
+        p = 0.15, v = 6
+        p = 0.15, v = 7
+        p = 0.14, v = 8
+        p = 0.11, v = 9
+        p = 0.08, v = 10
+        p = 0.06, v = 11
+        p = 0.04, v = 12
+        p = 0.03, v = 13
+        p = 0.02, v = 14
+    end
+end
+
+contagion spok
+    state type spok_state_t
+
+    transition
+        E -> I, p = symptomatic_prob, dwell = exposed_dwell_time
+        E -> A, p = asymptomatic_prob, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob, dwell = hosp_to_death
+        H -> R, p = not_death_prob, dwell = hosp_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+    end
+
+    susceptibility spok_susceptibility
+    infectivity spok_infectivity
+    transmissibility spok_transmissibility
+    enabled spok_enabled
+end
+
+def spok_susceptibility(v: node) -> float:
+    var s: float = 1.0
+
+    if v.age <= 4:
+        s = sus_0_4
+    elif v.age <= 11:
+        s = sus_5_11
+    elif v.age <= 17:
+        s = sus_12_17
+    elif v.age <= 29:
+        s = sus_18_29
+    elif v.age <= 49:
+        s = sus_30_49
+    elif v.age <= 64:
+        s = sus_50_64
+    elif v.age <= 74:
+        s = sus_65_74
+    else:
+        s = sus_75p
+    end
+
+    return s
+end
+
+def spok_infectivity(v: node) -> float:
+    var i: float = 0.0
+
+    switch v.spok.state:
+        case E: i = infectivity_E
+        case I: i = infectivity_I
+        case A: i = infectivity_A
+    end
+
+    return i
+end
+
+def spok_transmissibility(e: edge) -> float:
+    return baseline_tau * (1.0 - exp(-cdose * e.duration))
+end
+
+def spok_enabled(e: edge) -> bool:
+    return True
+end
+
+nodeset nodeset1, nodeset2
+
+# Number of importations this tick for schedule import_schedule_id. Rendered from the library:
+# one case per nonzero event, key = schedule_id * 1000 + tick.
+def scheduled_imports() -> int:
+    var n: int = 0
+
+    switch import_schedule_id * 1000 + CUR_TICK:
+        {% for ev in import_events | default([]) %}
+        case {{ ev.key }}:
+            n = {{ ev.n }}
+        {% endfor %}
+        default:
+            n = 0
+    end
+
+    return n
+end
+
+# Importations enter E: travelers infected abroad arrive during incubation. Runs every tick (a
+# zero-size sample when nothing is scheduled) so new_import_count is refreshed each tick.
+def import_infections():
+    imports_scheduled = scheduled_imports()
+
+    select(nodeset1, [v: node -> bool](
+        v.spok.state == S
+        and import_min_age <= v.age and v.age <= import_max_age
+        and (v.gateway or import_gateway_only == 0)
+    ))
+    sample(nodeset2, nodeset1, imports_scheduled, ABSOLUTE)
+    apply(nodeset2, [v: node]{
+        v.spok.state = E
+        v.imported = True
+    })
+
+    new_import_count <- reduce(nodeset2, [n: node -> int](1), +)
+end
+
+# Admissions this tick: nodes in H not yet counted. A person is admitted at most once (R is
+# absorbing), so no reset is needed. This fixes Round 20's census-like new_hosp_count.
+def update_new_hosp_count():
+    select(nodeset1, [v: node -> bool](
+        v.spok.state == H
+        and not v.counted_admission
+    ))
+
+    new_hosp_count <- reduce(nodeset1, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.counted_admission = True
+    })
+end
+
+def intervene():
+    import_infections()
+    update_new_hosp_count()
+end

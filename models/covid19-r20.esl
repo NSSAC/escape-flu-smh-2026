@@ -1,0 +1,660 @@
+# SMH Covid19 Round 20 -- newOutcomeProbs variant
+# hosp_prob (CHR) and death_prob (CFR) are age-continuous, built in
+# analyses/immune_history/outcome_probs.py + outcome_probs.ipynb from the CDC-2023 age
+# rate-ratio SHAPE and this model's realised infection age-distribution (a scenario-B run).
+# hosp_prob_reduction_under65 is REMOVED; the age shape is the driver. hosp_prob_scale kept.
+
+# Specific ticks
+# sim_start_tick = 0 : 2025-05-25
+# proj_start_tick = 14 : 2025-06-08
+# proj_end_tick = 741 : 2027-06-05
+
+## 7-28 initial best parameters
+## VA: baseline_tau = 0.011772059099748731, tau_seasonality_scale = 0.010643822490237653, hosp_prob_reduction_under65 = 0.03599674664437771
+ 
+config baseline_tau: float = 0.014
+config tau_seasonality_scale: float = 0.0125
+config baseline_seed_prob: float = 1e-5
+
+# --- Winter-wave attenuation (calibration knob) -----------------------------------------------
+# cur_seasonality is the statistical-fit seasonality loaded from REGION-seasonality.parquet.
+# winter_seasonality_scale multiplies it DOWN across the winter window only, so an over-large
+# winter wave can be tuned WITHOUT re-fitting the parquet. 1.0 = use the fit unchanged (the
+# default, a no-op); <1 damps the winter wave; >1 amplifies it. The window is
+# [winter_split_tick, winter_end_tick] and is applied AGAIN +365 ticks later for the next winter
+# (see in_winter_window / update_seasonality). Defaults bracket the 2025-26 winter between the
+# autumn summer->winter saddle and the spring trough before the 2026 summer wave (VA both: the
+# saddle is ~tick 141, the trough ~tick 374; epoch tick 0 = 2025-05-25, so 374 = 2026-06-03, and
+# 374 + 365 = 739 <= proj_end_tick 741). Put the split ticks AT the seasonality troughs to keep
+# the step at the window edge small. Ticks are float because the calibration harness passes
+# configs as dict[str, float] (py-modules .../calibrate.py); they compare against integer CUR_TICK.
+config winter_seasonality_scale: float = 0.7
+config winter_split_tick: float = 150.0
+config winter_end_tick: float = 374.0
+
+config hosp_prob_scale: float = 1.0
+
+# Age-gradient knob: multiplies the 65+ rungs of the CHR ladder only, so hosp_prob_scale sets the
+# LEVEL of admissions and this sets their AGE SPLIT -- one parameter per target, which is what
+# makes both identifiable against the separately observed 0-64 and 65+ NHSN series. 1.0 = the
+# ladder unchanged (the default, a no-op). Fitting test-output31 (4096-cell sweep, VA scenario B)
+# against NHSN put the model ~1.66x too flat across age at every good-fitting parameter set
+# (log(65+ fit ratio / 0-64 fit ratio) = -0.51, 5-95%: -0.44 to -0.59), and NO parameter in that
+# sweep could move it -- |Spearman rho| <= 0.06 for all seven -- because none of them touched
+# hosp_prob. Hence this knob; ~1.66 is the value that correction implies.
+# See covid19-round20/notebooks/sweep/ (README.md, next_design.py).
+config hosp_prob_65p_scale: float = 1.0
+
+# High-risk vs low-risk hospitalization multipliers for adults 18-64 (65+ are all high-risk in
+# the synthetic population, so their CHR band value already IS the high-risk value). m_high/m_low
+# = RR_hr and the population-weighted mean is 1, so the split re-weights within a band without
+# changing its total. See analyses/immune_history/outcome_probs.py (RR_hr ~ 3; CDC
+# underlying-conditions 3-6x). This variant drops the under-65 knock-down; the age SHAPE drives.
+config hosp_prob_hr_high: float = 2.099
+config hosp_prob_hr_low: float = 0.700
+
+# The following cdose is obtained by solving the Wells-Riley model
+# p = 1.0 - exp(-cdose * t)
+# where p = 0.9 and t = 2 * 3600
+config cdose: float = 3.198035e-04
+
+# immune escape: 35% per year
+# 1 - immune_escape_per_day ** 365 = .35
+# immune_escape_per_day = (1 - .35) ** (1.0 / 365)
+config immune_escape_per_day: float = 9.988205e-01
+
+# immune waning against infection: 50% in 5 months
+# 1 - infection_waning_per_day ** (30 * 5.0) == .5
+# infection_waning_per_day = (1 - .5) ** (1.0 / (30 * 5.0))
+config infection_waning_per_day: float = 9.953897e-01
+
+# immune waning against hospitalization: 50% in 10 months
+# Half the waning rate used against infection, i.e. double the half life,
+# reflecting that protection against severe disease is more durable than
+# protection against infection.
+# 1 - hosp_waning_per_day ** (30 * 10.0) == .5
+# hosp_waning_per_day = (1 - .5) ** (1.0 / (30 * 10.0))
+config hosp_waning_per_day: float = 9.976922e-01
+
+# ve against infection: 46%
+# immunity due to infection same as ve
+#config infection_ve: float = 0.46
+## adjusted for achieving 46% on Aug 15
+
+#config infection_ve: float = 0.5026
+config infection_ve: float = 0.75
+
+# ve against hospitalization 55%
+# (combined effect of infection_ve and hosp_ve)
+# specified in vaccine effectiveness of round 20 readme
+# pure hosp_ve = 55% - infection_ve
+# config hosp_ve: float = 0.09  ## original
+## adjusted for achieving 9% on Aug 15
+
+#config hosp_ve: float = 0.0983
+config hosp_ve: float = 0.10
+
+# since death only follows hosp
+# and we based our ratios on observations
+# we don't need a separate death_ve.
+statistic new_hosp_count: int = 0
+statistic new_hosp_with_recent_vax_count: int = 0
+
+global NEG_INFTY: int = -999999
+
+global cur_deaths_per_hosp_0_64: float = 0.0
+global cur_deaths_per_hosp_65p: float = 0.0
+
+global cur_seasonality: float = 0.0
+
+enum covid_state_t
+    S, # Susceptible
+    V, # Vaccinated
+    E, # Exposed
+    I, # Infectious (symptomatic)
+    A, # Infectious (asymptomatic)
+    H, # Hospitalized
+    D, # Dead
+    R  # Recovered
+end
+
+# REGION-person.parquet
+# columns: pid,age,high_risk,last_vax_tick,last_vax_formulation_tick,last_infection_tick,
+#          current_state,current_state_entry_tick,burnin_infection_tick
+# type:
+#   pid: int
+#   age: int
+#   high_risk: bool
+#   last_vax_tick: int (can be negative)
+#   last_vax_formulation_tick: int (can be negative)
+#   last_infection_tick: int (can be negative)
+#   current_state: str (a covid_state_t name: S/E/I/A/H/D/R; loaded as the enum)
+#   current_state_entry_tick: int (tick the agent entered current_state; can be negative)
+#   burnin_infection_tick: int (tick in [0,6] this agent is newly infected during burn-in, or NEVER)
+
+node
+    pid: int node key
+    age: i8 static
+    high_risk: bool static
+    last_vax_tick: i32 static
+    last_vax_formulation_tick: i32 static
+    last_infection_tick: i32 static
+
+    # Initial disease state at tick 0 and the tick the node entered it, reconstructed from the
+    # natural history of the last infection (analyses/immune_history/current_state.py). Read once
+    # by init_node_state() to seed a non-naive population. The parquet stores the state NAME and
+    # it loads straight into this enum. current_state_entry_tick is loaded for provenance and for
+    # future exact-residual-dwell support; it is not yet used to set the in-state dwell (see the
+    # note in init_node_state).
+    current_state: covid_state_t static
+    current_state_entry_tick: i32 static
+
+    # Burn-in override (see seed_burnin). The tick in [0, 6] on which this agent is newly infected
+    # during the first week, or NEVER. Keeps the E->I->H pipeline fed until transmission ramps up;
+    # the simulator can run no dynamics before tick 0, so ticks 0-13 are treated as burn-in.
+    burnin_infection_tick: i32 static
+
+    # The tick at which the node was last vaccinated and infected
+    last_vax_campaign: i8
+
+    # Onset tick of the infection episode currently in progress.
+    # Promoted to last_infection_tick on entry to R,
+    # so that severity calculations during E/I/H
+    # keep seeing the *previous* episode's immunity
+    # instead of resetting the waning clock
+    # to the very infection being evaluated.
+    current_infection_tick: i32
+
+    # Book keeping
+    current_infection_tick_updated: bool
+    last_infection_tick_updated: bool
+    included_in_new_hosp_count: bool
+end
+
+edge
+    targetPID: int target node key
+    sourcePID: int source node key
+    duration: int static
+end
+
+def infection_immune_waning(v: node) -> float:
+    var iw_tick: int = max(v.last_infection_tick, v.last_vax_tick)
+    var iw: float = 1 - pow(infection_waning_per_day, CUR_TICK - iw_tick)
+    return iw
+end
+
+def hosp_immune_waning(v: node) -> float:
+    var iw_tick: int = max(v.last_infection_tick, v.last_vax_tick)
+    var iw: float = 1 - pow(hosp_waning_per_day, CUR_TICK - iw_tick)
+    return iw
+end
+
+def immune_escape(v: node) -> float:
+    var ie_tick: int = max(v.last_infection_tick, v.last_vax_formulation_tick)
+    var ie: float = 1 - pow(immune_escape_per_day, CUR_TICK - ie_tick)
+    return ie
+end
+
+def hosp_prob(v: node) -> float:
+    var prob: float = 0.0
+    var ve: float = 0.0
+
+    # CHR = P(hosp | symptomatic case I), applied at I -> H. Continuous age ladder: CDC-2023
+    # hospitalisation rate-ratio SHAPE distributed within the NHSN-anchored 0-64/65+ split against
+    # THIS model's realised infection age-distribution (VA scenario B). Population-average per band;
+    # the high_risk split (adults 18-64) and 65+ (all high-risk in the synpop) are applied below.
+    # See analyses/immune_history/outcome_probs.py + outcome_probs.ipynb.
+    if v.age <= 4:
+        prob = 0.000512
+    elif v.age <= 17:
+        prob = 0.000080
+    elif v.age <= 24:
+        prob = 0.001239
+    elif v.age <= 29:
+        prob = 0.001607
+    elif v.age <= 34:
+        prob = 0.001887
+    elif v.age <= 39:
+        prob = 0.001995
+    elif v.age <= 44:
+        prob = 0.002022
+    elif v.age <= 49:
+        prob = 0.002151
+    elif v.age <= 54:
+        prob = 0.002999
+    elif v.age <= 59:
+        prob = 0.004767
+    elif v.age <= 64:
+        prob = 0.008738
+    elif v.age <= 69:
+        prob = 0.017976
+    elif v.age <= 74:
+        prob = 0.032289
+    elif v.age <= 79:
+        prob = 0.052446
+    elif v.age <= 84:
+        prob = 0.074780
+    else:
+        prob = 0.109021
+    end
+
+    # high-risk split for adults 18-64 (65+ already carry the all-high-risk value; children: no split).
+    # m_high / m_low = RR_hr=3.0, population-weighted mean 1.
+    if 18 <= v.age and v.age <= 64:
+        if v.high_risk:
+            prob *= hosp_prob_hr_high
+        else:
+            prob *= hosp_prob_hr_low
+        end
+    end
+
+    # age-gradient knob, disjoint from the 18-64 split above: tilts 65+ against everyone else
+    # without touching the level of the under-65 bands. See hosp_prob_65p_scale.
+    if 65 <= v.age:
+        prob *= hosp_prob_65p_scale
+    end
+
+    if v.last_infection_tick > NEG_INFTY or v.last_vax_tick > NEG_INFTY:
+        ve = hosp_ve
+        ve *= 1.0 - hosp_immune_waning(v)
+        ve *= 1.0 - immune_escape(v)
+    end
+
+    prob *= (1.0 - ve)
+    prob *= hosp_prob_scale
+
+    return prob
+end
+def not_hosp_prob(v: node) -> float:
+    return 1.0 - hosp_prob(v)
+end
+
+def death_prob(v: node) -> float:
+    var base: float = 0.0
+    var factor: float = 1.0
+
+    # coarse level by bucket, time-varying (REGION-death-prob.parquet) -- unchanged
+    if v.age <= 64:
+        base = cur_deaths_per_hosp_0_64
+    else:
+        base = cur_deaths_per_hosp_65p
+    end
+
+    # fine age gradient WITHIN the bucket: CDC death/hosp ratio, H-weighted-normalised so the
+    # bucket mean stays 1 (the fatality time-trend level is preserved; only the age shape is added).
+    if v.age <= 4:
+        factor = 0.079764
+    elif v.age <= 17:
+        factor = 0.093058
+    elif v.age <= 29:
+        factor = 0.186115
+    elif v.age <= 39:
+        factor = 0.434269
+    elif v.age <= 49:
+        factor = 1.033974
+    elif v.age <= 64:
+        factor = 1.500931
+    elif v.age <= 74:
+        factor = 0.760086
+    elif v.age <= 84:
+        factor = 0.953514
+    else:
+        factor = 1.520173
+    end
+
+    return base * factor
+end
+def not_death_prob(v: node) -> float:
+    return 1.0 - death_prob(v)
+end
+
+distribution
+    discrete hosp_dwell_time
+        p = 0.70, v = 1
+        p = 0.10, v = 2
+        p = 0.09, v = 3
+        p = 0.04, v = 4
+        p = 0.03, v = 5
+        p = 0.02, v = 6
+        p = 0.02, v = 7
+    end
+
+    discrete hosp_to_death
+        p = 0.03, v = 3
+        p = 0.07, v = 4
+        p = 0.12, v = 5
+        p = 0.15, v = 6
+        p = 0.15, v = 7
+        p = 0.14, v = 8
+        p = 0.11, v = 9
+        p = 0.08, v = 10
+        p = 0.06, v = 11
+        p = 0.04, v = 12
+        p = 0.03, v = 13
+        p = 0.02, v = 14
+    end
+
+    # 1.4 - 5 days; mean 2
+    discrete infectious_dwell_time
+        p = 0.09809447, v = 1
+        p = 0.55216720, v = 2
+        p = 0.22202093, v = 3
+        p = 0.11332528, v = 4
+        p = 0.01439211, v = 5
+    end
+
+    # 1 - 4 days; mean 2
+    discrete exposed_dwell_time
+        p = 0.27964744, v = 1
+        p = 0.38802083, v = 2
+        p = 0.26322115, v = 3
+        p = 0.06911058, v = 4
+    end
+
+    # mean 5 weeks, std 1 week
+    normal recovered_dwell_time
+        mean = 35, std = 7
+    end
+end
+
+contagion covid
+    state type covid_state_t
+
+    transition
+        V -> S, dwell = 1.0
+
+        E -> I, p = 0.5, dwell = exposed_dwell_time
+        E -> A, p = 0.5, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob, dwell = hosp_to_death
+        H -> R, p = not_death_prob, dwell = hosp_dwell_time
+
+        R -> S, dwell = recovered_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+
+        E => V -> E
+        A => V -> E
+        I => V -> E
+    end
+
+    susceptibility covid_susceptibility
+    infectivity covid_infectivity
+    transmissibility covid_transmissibility
+    enabled covid_enabled
+end
+
+def covid_susceptibility(v: node) -> float:
+    var s: float = 1.0
+    var ve: float = 0.0
+
+    if v.last_infection_tick > NEG_INFTY or v.last_vax_tick > NEG_INFTY:
+        ve = infection_ve
+        ve *= 1.0 - infection_immune_waning(v)
+        ve *= 1.0 - immune_escape(v)
+    end
+
+    return s * (1.0 - ve)
+end
+
+def covid_infectivity(v: node) -> float:
+    var i: float = 0.0
+    var time_scaler: float = 0.0
+    var ramp_end_tick: int = 14
+    var ramp_start_level: float = 0.60
+
+    switch v.covid.state:
+        case E: i = 0.4
+        case I: i = 1.0
+        case A: i = 0.5
+    end
+
+    ##  Ramp up infectivity over the early ticks (3 weeks) to start smoothly from the burn-in seeding.
+    if CUR_TICK < ramp_end_tick:
+        time_scaler = ramp_start_level + (CUR_TICK / (ramp_end_tick - 1)) * 1.0
+    else:
+        time_scaler = 1.0
+    end
+
+    return i * time_scaler
+end
+
+def covid_transmissibility(e: edge) -> float:
+    var tau: float = baseline_tau + tau_seasonality_scale * cur_seasonality
+    tau *= (1.0 - exp(-cdose * e.duration))
+    return tau
+end
+
+def covid_enabled(e: edge) -> bool:
+    return True
+end
+
+# We use generic names for nodesets.
+# The will be reused in the different interventions.
+nodeset nodeset1, nodeset2
+
+# REGION-seasonality.parquet
+# columns: tick, scale
+# type:
+#   tick: int [0 -- 741]
+#   scale: float [0.0 - 1.0]
+
+# True inside the winter window [winter_split_tick, winter_end_tick], and again one year later
+# (+365 ticks) for the following winter. Bounds are float configs; CUR_TICK is int and the
+# comparison promotes, matching the `18 <= v.age and v.age <= 64` idiom above.
+def in_winter_window(t: int) -> bool:
+    var this_year: bool = winter_split_tick <= t and t <= winter_end_tick
+    var next_year: bool = winter_split_tick + 365.0 <= t and t <= winter_end_tick + 365.0
+    return this_year or next_year
+end
+
+def update_seasonality():
+    switch CUR_TICK:
+        {% for s in seasonality %}
+        case {{ s.tick }}:
+            cur_seasonality = {{ s.scale }}
+        {% endfor %}
+        default:
+            cur_seasonality = 0.0
+    end
+    # Damp (or amplify) the winter wave by a calibratable factor across the winter window(s).
+    # winter_seasonality_scale = 1.0 (default) leaves the loaded fit untouched.
+    if in_winter_window(CUR_TICK):
+        cur_seasonality *= winter_seasonality_scale
+    end
+end
+
+# REGION-death-prob.parquet
+# columns: tick, deaths_per_hosp_0_64, deaths_per_hosp_65p
+# type:
+#   tick: int [0 -- 741]
+#   deaths_per_hosp_0_64: float [0.0 - 1.0]
+#   deaths_per_hosp_65p: float [0.0 - 1.0]
+
+def update_death_prob():
+    switch CUR_TICK:
+        {% for dp in death_prob %}
+        case {{ dp.tick }}:
+            cur_deaths_per_hosp_0_64 = {{ dp.deaths_per_hosp_0_64 }}
+            cur_deaths_per_hosp_65p = {{ dp.deaths_per_hosp_65p }}
+        {% endfor %}
+    end
+end
+
+def seed_contagion():
+    select(nodeset1, [n: node -> bool](n.covid.state == S))
+    sample(nodeset2, nodeset1, baseline_seed_prob, RELATIVE)
+    apply(nodeset2, [n: node]{ n.covid.state = E ; })
+end
+
+# BURN-IN OVERRIDE. Nothing before tick 0 can be simulated, so the reconstruction primes tick 0
+# (init_node_state) and then keeps the infection pipeline fed for the first week: on each of ticks
+# 0..6, the agents scheduled by current_state.assign_burnin_infections (burnin_infection_tick ==
+# CUR_TICK) that are still susceptible are moved S -> E. They then progress E -> I -> (H|R) by the
+# model's OWN dwells and hosp_prob -- we seed, we do not force a state, because forcing freezes an
+# agent (re-set each tick before it can advance) and a forced H discharges within the same tick.
+# Transmission is left untouched and ramps alongside; by tick 7 it carries the epidemic on its own.
+def seed_burnin():
+    if CUR_TICK <= 6:
+        select(nodeset1, [v: node -> bool](
+            v.burnin_infection_tick == CUR_TICK
+            and v.covid.state == S
+        ))
+        apply(nodeset1, [v: node]{ v.covid.state = E ; })
+    end
+end
+
+# REGION-vaccination.parquet
+# columns: tick,new_vax_count,high_risk_only,min_age,max_age,vax_campaign,vax_forumlation_tick
+# type:
+#   tick: int [0--741]
+#   new_vax_count: int
+#   high_risk_only: bool
+#   min_age: int
+#   max_age: int
+#   vax_campaign: int (>=1)
+#   vax_forumlation_tick: int (can be negative)
+
+def vaccinate_nodes():
+    {% for s in vax_schedule %}
+    if (CUR_TICK == {{ s.tick }}):
+        if ({{ s.high_risk_only }}) :
+            select(nodeset1, [v: node -> bool](
+                {{ s.min_age }} <= v.age and v.age < {{ s.max_age }}
+                and v.last_vax_campaign != {{ s.vax_campaign }}
+                and v.high_risk
+                and (v.covid.state == S or v.covid.state == A)
+            ))
+        else:
+            select(nodeset1, [v: node -> bool](
+                {{ s.min_age }} <= v.age and v.age < {{ s.max_age }}
+                and v.last_vax_campaign != {{ s.vax_campaign }}
+                and (v.covid.state == S or v.covid.state == A)
+            ))
+        end
+
+        sample(nodeset2, nodeset1, {{ s.new_vax_count }}, ABSOLUTE)
+        apply(nodeset2, [v: node]{
+            v.last_vax_tick = CUR_TICK
+            v.last_vax_formulation_tick = {{ s.vax_forumlation_tick }}
+            v.last_vax_campaign = {{ s.vax_campaign }}
+            v.covid.state = V
+        })
+    end
+    {% endfor %}
+end
+
+def init_node_state():
+    # Seed the population's disease state and immune clocks from the reconstructed initial
+    # condition, ONCE at tick 0 (see intervene). Two assignments, both load-bearing:
+    #
+    #   v.covid.state = v.current_state
+    #       Place each agent mid-trajectory (E/I/A/H/R/D) instead of the default all-S. The
+    #       contagion engine re-samples a FRESH dwell for that state on the next step, so the
+    #       remaining in-state time is re-drawn rather than taken from current_state_entry_tick.
+    #       For E/I/A/H (dwell < ~2 weeks) that startup transient is absorbed by the 14-tick
+    #       burn-in before proj_start_tick; only R (35-day dwell) persists past it, which is the
+    #       intended recovered-immunity carryover. Exact residual dwell would need engine support
+    #       to set the internal dwell_time; current_state_entry_tick is loaded for when it exists.
+    #
+    #   v.current_infection_tick = v.last_infection_tick   (NOT NEG_INFTY)
+    #       CRITICAL, and a fix independent of the state seeding above. update_infection_ticks()
+    #       promotes last_infection_tick <- current_infection_tick for every S/V/R node on tick 0.
+    #       Seeding current_infection_tick to NEG_INFTY (the previous value here) therefore ERASED
+    #       the loaded infection immunity of the ENTIRE susceptible population on the first tick --
+    #       the dominant immunity channel. Seeding it to last_infection_tick makes that promotion a
+    #       no-op and preserves the reconstruction; for a node mid-episode it correctly records
+    #       this episode's onset.
+    apply(ALL_NODES, [v: node]{
+        v.covid.state = v.current_state
+        v.current_infection_tick = v.last_infection_tick
+    })
+end
+
+
+def update_infection_ticks():
+    select(nodeset1, [v: node -> bool](
+        v.covid.state == E
+        and not v.current_infection_tick_updated
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick = CUR_TICK
+        v.current_infection_tick_updated = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        v.covid.state != E
+        and v.current_infection_tick_updated
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_updated = False
+    })
+
+    select(nodeset1, [v: node -> bool](
+        (v.covid.state == S or v.covid.state == V or v.covid.state == R)
+        and not v.last_infection_tick_updated
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick = v.current_infection_tick
+        v.last_infection_tick_updated = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        not (v.covid.state == S or v.covid.state == V or v.covid.state == R)
+        and v.last_infection_tick_updated
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_updated = False
+    })
+end
+
+def update_new_hosp_count():
+    select(nodeset1, [v: node -> bool](
+        v.covid.state == H
+        and not v.included_in_new_hosp_count
+    ))
+
+    new_hosp_count <- reduce(nodeset1, [n: node -> int](1), +)
+
+    select(nodeset1, [v: node -> bool](
+        v.covid.state == H
+        and not v.included_in_new_hosp_count
+        and (CUR_TICK - v.last_vax_tick) < 365
+    ))
+
+    new_hosp_with_recent_vax_count <- reduce(nodeset1, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.included_in_new_hosp_count = True
+    })
+
+    select(nodeset1, [v: node -> bool]( v.covid.state != H and v.included_in_new_hosp_count ))
+
+    apply(nodeset1, [v: node]{
+        v.included_in_new_hosp_count = False
+    })
+end
+
+def intervene():
+    if CUR_TICK == 0:
+        init_node_state()
+    elif CUR_TICK < 14:
+        seed_burnin()
+    elif CUR_TICK > 21:
+        seed_contagion()
+    end
+
+    update_seasonality()
+    update_death_prob()
+    vaccinate_nodes()
+    update_infection_ticks()
+    update_new_hosp_count()
+end

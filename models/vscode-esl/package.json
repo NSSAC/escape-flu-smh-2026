@@ -1,0 +1,40 @@
+{
+  "name": "vscode-esl",
+  "displayName": "ESL (Epidemic Simulator Language)",
+  "description": "Syntax highlighting for ESL, the domain specific language of the ESCAPE framework.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publisher": "nssac",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NSSAC/tree-sitter-esl"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "esl",
+        "aliases": [
+          "ESL",
+          "esl"
+        ],
+        "extensions": [
+          ".esl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "esl",
+        "scopeName": "source.esl",
+        "path": "./syntaxes/esl.tmLanguage.json"
+      }
+    ]
+  }
+}

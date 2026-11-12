@@ -1,0 +1,365 @@
+{
+ "name": "prodv3_WA",
+ "state": "WA",
+ "person_file": "data/person/prod2025/WA-person.parquet",
+ "n_particles": 128,
+ "anchor": "2025-08-03",
+ "end": "2026-10-04",
+ "fit_start": "2025-08-09",
+ "fit_end": "2026-06-27",
+ "proj_start": null,
+ "proj_end": null,
+ "season_break": null,
+ "campaigns": [
+  {
+   "season": "2025-26",
+   "campaign": 1
+  },
+  {
+   "season": "2026-27",
+   "coverage": "2026-27-B",
+   "campaign": 2
+  }
+ ],
+ "propensity_slack": 1.25,
+ "fixed": {
+  "tau_scale_A_H1N1": 1.0,
+  "tau_scale_A_H1N1_next": 1.0,
+  "immune_escape_per_day": 0.999525354,
+  "ltimm_child_rel": 0.5,
+  "ltimm_protection": 0.8,
+  "seed_start_A_H1N1": 359.5,
+  "seed_start_A_H3N2": 79.5,
+  "seed_start_B": 156.5,
+  "share_w_A_H1N1": 0.1762,
+  "hosp_prob_scale": 1.08,
+  "seed_days": 70.0,
+  "seed_floor": 0.1,
+  "infection_half_life_days": 365.0,
+  "ltimm_frac": 0.367,
+  "hosp_age_mult_0_4": 0.3086,
+  "hosp_age_mult_5_17": 0.1485,
+  "hosp_age_mult_18_49": 0.9521,
+  "hosp_age_mult_50_64": 1.6886,
+  "hosp_age_mult_65p": 1.7579,
+  "vax_escape_per_day": 1.0,
+  "vax_infection_ve": 0.43,
+  "vax_symp_ve": 0.46,
+  "vax_hosp_ve": 0.0,
+  "tau_mult": 1.16
+ },
+ "priors": {
+  "baseline_tau": [
+   0.00266,
+   0.01062,
+   "log"
+  ],
+  "tau_seasonality_scale": [
+   0.00266,
+   0.01593,
+   "lin"
+  ],
+  "seas_peak_tick": [
+   135.0,
+   183.6,
+   "lin"
+  ],
+  "seas_power": [
+   1.0,
+   4.0,
+   "lin"
+  ],
+  "baseline_seed_prob": [
+   1e-06,
+   0.0001,
+   "log"
+  ],
+  "seas_lag_A_H3N2": [
+   -56.0,
+   56.0,
+   "lin"
+  ],
+  "seas_lag_B": [
+   7.0,
+   119.0,
+   "lin"
+  ],
+  "share_w_A_H3N2": [
+   0.3022,
+   1.0,
+   "log"
+  ],
+  "share_w_B": [
+   0.1097,
+   0.4387,
+   "log"
+  ]
+ },
+ "next_season": "sample",
+ "likelihood": {
+  "nb_size": 20.0,
+  "subtype_weight": 1.0,
+  "subtype_neff": 200.0,
+  "background": {
+   "fit": 14.0,
+   "proj": 11.0
+  },
+  "background_mode": "floor",
+  "subtype_weekly": 0.3
+ },
+ "keep_h5": false,
+ "seed": 3957,
+ "production": {
+  "season": "2026-27",
+  "origin": "2026-10-04",
+  "data_end": "2026-10-03",
+  "scenarios": {
+   "A-2026-09-29": "2026-27-A",
+   "B-2026-09-29": "2026-27-B",
+   "C-2026-09-29": "2026-27-C",
+   "D-2026-09-29": null
+  },
+  "restart_anchor": "2026-08-09",
+  "restart_person_file": "data/person/WA-person.parquet",
+  "next": {
+   "seas_peak_tick_next": [
+    423.0,
+    596.6,
+    "lin"
+   ],
+   "seas_lag_B_next": [
+    -32.2,
+    74.9,
+    "lin"
+   ],
+   "seas_lag_A_H3N2_next": [
+    -21.0,
+    53.9,
+    "lin"
+   ],
+   "share_w_A_H1N1_next": [
+    0.45,
+    0.85,
+    "log"
+   ],
+   "share_w_A_H3N2_next": {
+    "mix": [
+     [
+      0.003,
+      0.06,
+      0.5
+     ],
+     [
+      0.175,
+      0.35,
+      0.5
+     ]
+    ],
+    "scale": "log"
+   },
+   "share_w_B_next": {
+    "mix": [
+     [
+      0.003,
+      0.06,
+      0.284
+     ],
+     [
+      0.118,
+      0.3,
+      0.716
+     ]
+    ],
+    "scale": "log"
+   },
+   "seed_start_A_H1N1_next": [
+    364.0,
+    399.0,
+    "lin"
+   ],
+   "seed_start_A_H3N2_next": [
+    433.0,
+    533.8,
+    "lin"
+   ],
+   "seed_start_B_next": [
+    432.3,
+    547.8,
+    "lin"
+   ],
+   "tau_next_mult": [
+    0.6,
+    1.6,
+    "log"
+   ],
+   "escape_next_A_H1N1": [
+    0.0,
+    0.45,
+    "lin"
+   ],
+   "escape_next_A_H3N2": [
+    0.0,
+    0.3,
+    "lin"
+   ],
+   "escape_next_B": [
+    0.0,
+    0.3,
+    "lin"
+   ],
+   "seed_boost_A_H1N1_next": [
+    1.0,
+    30.0,
+    "log"
+   ],
+   "seed_days_A_H1N1_next": [
+    7.0,
+    35.0,
+    "lin"
+   ]
+  },
+  "proj_window": [
+   "2026-08-08",
+   "2027-06-05"
+  ],
+  "end": "2027-06-05",
+  "early_slope_weight": 1.0,
+  "early_slope_sd": 0.03
+ },
+ "model": "flu-r1-2026-27-v4.esl",
+ "draws": {},
+ "share_map": {
+  "fit": {
+   "A_H3N2": {
+    "c": -0.0508,
+    "A_H3N2": 7.0621,
+    "B": 1.8423,
+    "seed": 0.5315
+   },
+   "B": {
+    "c": 0.1452,
+    "A_H3N2": 2.3659,
+    "B": 6.6811,
+    "seed": 0.534
+   }
+  },
+  "next": {
+   "A_H3N2": {
+    "c": -0.3449,
+    "A_H3N2": 7.8765,
+    "B": -0.4627,
+    "seed": 0.4641
+   },
+   "B": {
+    "c": 0.2314,
+    "A_H3N2": 1.2625,
+    "B": 6.487,
+    "seed": 0.5077
+   }
+  }
+ },
+ "provenance": {
+  "generator": "flu-round1-2026-27/notebooks/informed_priors.py",
+  "base": "prod2025_WA",
+  "as_of": "2025-26",
+  "fit_season": "2025-26",
+  "next_season": "2026-27",
+  "offset_days": 28.7,
+  "offset_sd": 16.2,
+  "offset_runs": 80,
+  "lab_to_nhsn_days": 0.0,
+  "share_map_fit": {
+   "fit_A_H3N2": {
+    "n": 149,
+    "r2": 0.762,
+    "resid_sd": 0.878
+   },
+   "fit_B": {
+    "n": 149,
+    "r2": 0.758,
+    "resid_sd": 0.937
+   },
+   "next_A_H3N2": {
+    "n": 149,
+    "r2": 0.725,
+    "resid_sd": 1.03
+   },
+   "next_B": {
+    "n": 149,
+    "r2": 0.706,
+    "resid_sd": 1.042
+   }
+  },
+  "threshold": 0.1,
+  "s0_from_history": {
+   "182": {
+    "A_H1N1": 0.9495,
+    "A_H3N2": 0.952,
+    "B": 0.9627
+   },
+   "1095": {
+    "A_H1N1": 0.9168,
+    "A_H3N2": 0.9215,
+    "B": 0.9561
+   },
+   "446": {
+    "A_H1N1": 0.9323,
+    "A_H3N2": 0.9364,
+    "B": 0.9589
+   }
+  },
+  "waning_half_life_days": {
+   "infection": [
+    182.0,
+    1095.0
+   ],
+   "immune_escape": 1460
+  },
+  "s0_band": [
+   0.62,
+   0.8
+  ],
+  "design": "reduced",
+  "priors": {
+   "seas_peak_tick": "NHSN peak 2026-02-07 - offset 29 d (n=80 runs) +- 24 d",
+   "seas_lag_B_next": "B - dominant A peak, 10 seasons, p10..p90",
+   "seas_lag_A_H3N2_next": "national H3 - H1 peak gap, 10 co-circulation seasons, p10..p90, at least +-21 d",
+   "share_w_A_H1N1": "2025-26 reconstruction share 0.18, x/2..x2",
+   "share_w_A_H3N2": "2025-26 reconstruction share 0.60, x/2..x2",
+   "share_w_B": "2025-26 reconstruction share 0.22, x/2..x2",
+   "seed_start_A_H1N1": "2025-26 state onset 2026-08-22 - 42..7 d",
+   "seed_start_A_H3N2": "2025-26 state onset 2025-11-15 - 42..7 d",
+   "seed_start_A_H3N2_next": "13 historical A_H3N2 onsets moved to 2026-27, p10-42 .. p90-7 d",
+   "seed_start_B": "2025-26 state onset 2026-01-31 - 42..7 d",
+   "seed_start_B_next": "10 historical B onsets moved to 2026-27, p10-42 .. p90-7 d",
+   "seed_days": "seeding window length",
+   "seed_floor": "seeding outside the window, relative to inside",
+   "infection_half_life_days": "infection protection half-life (0.5-3 y), judged on projection skill; drift half-life fixed at 4 y",
+   "ltimm_frac": "fixed: tick-0 S0 0.7 from history S0 0.945 (half-life 365 d)",
+   "baseline_tau": "base range x 1.33 (S0 0.94 -> 0.71)",
+   "tau_seasonality_scale": "base range x 1.33 (S0 0.94 -> 0.71)",
+   "hosp_prob_scale": "near 1: the IHR ladder is FluSurv-NET data; a wide scale lets a 60% attack rate with low severity fit NHSN as well as a 10% one (bt2023 top runs: AR 9-80%)",
+   "baseline_seed_prob": "now the in-window rate; bt2023 top runs sat at the old upper bound 3e-5",
+   "background_fit": "likelihood: NHSN median week, summer 2025 (11 weeks)",
+   "background_proj": "likelihood: NHSN median week, summer 2026 (11 weeks)",
+   "seas_lag_A_H3N2": "searched (two-stage): observed gap +0 wk +- 8 wk (bt2024k WA's two 2024-25 peaks need it)",
+   "seas_lag_B": "searched (two-stage): observed gap +9 wk +- 8 wk (bt2024k WA's two 2024-25 peaks need it)",
+   "seed_start_A_H1N1_next": "early season: NHSN growing x1.29/wk at 2026-10-03, 22.0x the same week of 2022-23, 2023-24, 2025-26; seeding from the restart anchor 2026-08-09",
+   "share_w_A_H1N1_next": "early season: H1N1 97% of A (2026-08-09..2026-10-03) -> H1-dominant season, no 'absent' segment",
+   "share_w_A_H3N2_next": "early season: H3N2 3% of A -> 'absent' weight 0.5, capped 0.35",
+   "share_w_B_next": "early season: B 1% of positives so far (usually late); history mixture capped 0.3",
+   "seas_peak_tick_next": "history range, lower end 28 d earlier (early season)",
+   "tau_next_mult": "the backtests' good region (it06 round 2)",
+   "escape_next_A_H1N1": "the backtests' good region (it06 round 2); stacks with tau_next_mult",
+   "escape_next_A_H3N2": "the backtests' good region (it06 round 2); stacks with tau_next_mult",
+   "escape_next_B": "the backtests' good region (it06 round 2); stacks with tau_next_mult",
+   "hosp_age_mult_0_4": "fixed: NHSN admissions share by age / the model's (age_anchor.py)",
+   "hosp_age_mult_5_17": "fixed: NHSN admissions share by age / the model's (age_anchor.py)",
+   "hosp_age_mult_18_49": "fixed: NHSN admissions share by age / the model's (age_anchor.py)",
+   "hosp_age_mult_50_64": "fixed: NHSN admissions share by age / the model's (age_anchor.py)",
+   "hosp_age_mult_65p": "fixed: NHSN admissions share by age / the model's (age_anchor.py)"
+  },
+  "prodv3_base": "seedx2_WA"
+ },
+ "notes": "prod-v3 test (2026-11-05): seedx2_WA under model v4 with the hub-matched vaccine {'vax_escape_per_day': 1.0, 'vax_infection_ve': 0.43, 'vax_symp_ve': 0.46, 'vax_hosp_ve': 0.0}, tau x 1.16, hosp_prob_scale x 1.08; the same 60 selected members, not re-selected. scripts/proj/make_prodv3.py. Base notes: Early-rise fix (2026-11-02): prod2025o_WA's round 1 (copied) and seed with seedx2_FL's next-season A_H1N1 seeding pulse (model v3), H1N1 escape up to 0.45 and the early growth term at sd 0.03 (scripts/proj/make_seedx.py). Informed priors (as of 2025-26) from the subtype-season analysis; see provenance. Base: prod2025_WA.  Age re-anchored (2026-10-29): hosp_age_mult_<band> fixed from notebooks/age_anchor.py; otherwise prod2025n_<ST> with its seed, so round 1 re-simulates the same Sobol points under the re-anchored ladder."
+}

@@ -1,0 +1,6 @@
+{
+    project: "escape-flu-smh",
+    remotes: {
+        rivanna: "biihead1:escape-flu-smh",
+    }
+}

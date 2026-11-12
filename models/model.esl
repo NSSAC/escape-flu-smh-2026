@@ -1,0 +1,395 @@
+# SMH Covid19 Round 20
+
+# Specific ticks
+# sim_start_tick = 0 : 2025-05-25
+# proj_start_tick = 14 : 2025-06-08
+# proj_end_tick = 741 : 2027-06-05
+
+config baseline_tau: float = 2e-3
+config tau_seasonality_scale: float = 3e-2
+config baseline_seed_prob: float = 1e-5
+
+config hosp_prob_scale: float = 1.0
+
+# The following cdose is obtained by solving the Wells-Riley model
+# p = 1.0 - exp(-cdose * t)
+# where p = 0.9 and t = 2 * 3600
+config cdose: float = 3.198035e-04
+
+# immune escape: 35% per year
+# 1 - immune_escape_per_day ** 365 = .35
+# immune_escape_per_day = (1 - .35) ** (1.0 / 365)
+config immune_escape_per_day: float = 9.988205e-01
+
+# immune waning: 50% in 5 months
+# 1 - immune_waning_per_day ** (30 * 5.0) == .5
+# immune_waning_per_day = (1 - .5) ** (1.0 / (30 * 5.0))
+config immune_waning_per_day: float = 9.953897e-01
+
+# ve against infection: 46%
+# immunity due to infection same as ve
+config infection_ve: float = 0.46
+
+# ve against hospitalization 55%
+# (combined effect of infection_ve and hosp_ve)
+# specified in vaccine effectiveness of round 20 readme
+# pure hosp_ve = 55% - infection_ve
+config hosp_ve: float = 0.09
+
+# since death only follows hosp
+# and we based our ratios on observations
+# we don't need a separate death_ve.
+statistic new_hosp_count: int = 0
+statistic new_hosp_with_recent_vax_count: int = 0
+
+global NEG_INFTY: int = -999999
+
+global cur_deaths_per_hosp_0_64: float = 0.0
+global cur_deaths_per_hosp_65p: float = 0.0
+
+global cur_seasonality: float = 0.0
+
+enum covid_state_t
+    S, # Susceptible
+    V, # Vaccinated
+    E, # Exposed
+    I, # Infectious (symptomatic)
+    A, # Infectious (asymptomatic)
+    H, # Hospitalized
+    D, # Dead
+    R  # Recovered
+end
+
+# REGION-person.parquet
+# columns: pid,age,high_risk,last_vax_tick,last_vax_formulation_tick,last_infection_tick
+# type:
+#   pid: int
+#   age: int
+#   high_risk: bool
+#   last_vax_tick: int (can be negative)
+#   last_vax_formulation_tick: int (can be negative)
+#   last_infection_tick: int (can be negative)
+
+node
+    pid: int node key
+    age: i8 static
+    high_risk: bool static
+    last_vax_tick: i32 static
+    last_vax_formulation_tick: i32 static
+    last_infection_tick: i32 static
+
+    # The tick at which the node was last vaccinated and infected
+    last_vax_campaign: i8
+
+    # Book keeping
+    last_infection_tick_updated: bool
+    included_in_new_hosp_count: bool
+end
+
+edge
+    targetPID: int target node key
+    sourcePID: int source node key
+    duration: int static
+end
+
+def immune_waning(v: node) -> float:
+    var iw_tick: int = max(v.last_infection_tick, v.last_vax_tick)
+    var iw: float = 1 - pow(immune_waning_per_day, CUR_TICK - iw_tick)
+    return iw
+end
+
+def immune_escape(v: node) -> float:
+    var ie_tick: int = max(v.last_infection_tick, v.last_vax_formulation_tick)
+    var ie: float = 1 - pow(immune_escape_per_day, CUR_TICK - ie_tick)
+    return ie
+end
+
+def hosp_prob(v: node) -> float:
+    var prob: float = 0.0
+    var ve: float = 0.0
+
+    # original from EpiHiper model
+    # prob = 0.0142
+    # re-estimated based on observed hosp ratio of 0-64/65+
+    # and population distribution
+
+    if v.high_risk:
+        prob = 0.0323
+    elif v.age <= 4:
+        prob = 0.0010
+    elif v.age <= 17:
+        prob = 0.0007
+    elif v.age <= 49:
+        prob = 0.0041
+    elif v.age <= 64:
+        prob = 0.0049
+    else: # v.age >= 65
+        prob = 0.0323
+    end
+
+    if v.last_infection_tick > NEG_INFTY or v.last_vax_tick > NEG_INFTY:
+        ve = hosp_ve
+        ve *= 1.0 - immune_waning(v)
+        ve *= 1.0 - immune_escape(v)
+    end
+
+    prob *= (1.0 - ve)
+    prob *= hosp_prob_scale
+
+    return prob
+end
+
+def not_hosp_prob(v: node) -> float:
+    return 1.0 - hosp_prob(v)
+end
+
+def death_prob(v: node) -> float:
+    var prob: float = 0.0
+
+    if v.age <= 65:
+        prob = cur_deaths_per_hosp_0_64
+    else:
+        prob = cur_deaths_per_hosp_65p
+    end
+
+    return prob
+end
+
+def not_death_prob(v: node) -> float:
+    return 1.0 - death_prob(v)
+end
+
+distribution
+    discrete hosp_dwell_time
+        p = 0.70, v = 1
+        p = 0.10, v = 2
+        p = 0.09, v = 3
+        p = 0.04, v = 4
+        p = 0.03, v = 5
+        p = 0.02, v = 6
+        p = 0.02, v = 7
+    end
+
+    # 1.4 - 5 days; mean 2
+    discrete infectious_dwell_time
+        p = 0.09809447, v = 1
+        p = 0.55216720, v = 2
+        p = 0.22202093, v = 3
+        p = 0.11332528, v = 4
+        p = 0.01439211, v = 5
+    end
+
+    # 1 - 4 days; mean 2
+    discrete exposed_dwell_time
+        p = 0.27964744, v = 1
+        p = 0.38802083, v = 2
+        p = 0.26322115, v = 3
+        p = 0.06911058, v = 4
+    end
+
+    # mean 5 weeks, std 1 week
+    normal recovered_dwell_time
+        mean = 35, std = 7
+    end
+end
+
+contagion covid
+    state type covid_state_t
+
+    transition
+        V -> S, dwell = 1.0
+
+        E -> I, p = 0.5, dwell = exposed_dwell_time
+        E -> A, p = 0.5, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob, dwell = hosp_dwell_time
+        H -> R, p = not_death_prob, dwell = hosp_dwell_time
+
+        R -> S, dwell = recovered_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+
+        E => V -> E
+        A => V -> E
+        I => V -> E
+    end
+
+    susceptibility covid_susceptibility
+    infectivity covid_infectivity
+    transmissibility covid_transmissibility
+    enabled covid_enabled
+end
+
+def covid_susceptibility(v: node) -> float:
+    var s: float = 1.0
+    var ve: float = 0.0
+
+    if v.last_infection_tick > NEG_INFTY or v.last_vax_tick > NEG_INFTY:
+        ve = infection_ve
+        ve *= 1.0 - immune_waning(v)
+        ve *= 1.0 - immune_escape(v)
+    end
+
+    return s * (1.0 - ve)
+end
+
+def covid_infectivity(v: node) -> float:
+    var i: float = 0.0
+
+    switch v.covid.state:
+        case E: i = 0.4
+        case I: i = 1.0
+        case A: i = 0.5
+    end
+
+    return i
+end
+
+def covid_transmissibility(e: edge) -> float:
+    var tau: float = baseline_tau + tau_seasonality_scale * cur_seasonality
+    tau *= (1.0 - exp(-cdose * e.duration))
+    return tau
+end
+
+def covid_enabled(e: edge) -> bool:
+    return True
+end
+
+# We use generic names for nodesets.
+# The will be reused in the different interventions.
+nodeset nodeset1, nodeset2
+
+# REGION-seasonality.parquet
+# columns: tick, scale
+# type:
+#   tick: int [0 -- 741]
+#   scale: float [0.0 - 1.0]
+
+def update_seasonality():
+    switch CUR_TICK:
+        {% for s in seasonality %}
+        case {{ s.tick }}:
+            cur_seasonality = {{ s.scale }}
+        {% endfor %}
+        default:
+            cur_seasonality = 0.0
+    end
+end
+
+# REGION-death-prob.parquet
+# columns: tick, deaths_per_hosp_0_64, deaths_per_hosp_65p
+# type:
+#   tick: int [0 -- 741]
+#   deaths_per_hosp_0_64: float [0.0 - 1.0]
+#   deaths_per_hosp_65p: float [0.0 - 1.0]
+
+def update_death_prob():
+    switch CUR_TICK:
+        {% for dp in death_prob %}
+        case {{ dp.tick }}:
+            cur_deaths_per_hosp_0_64 = {{ dp.deaths_per_hosp_0_64 }}
+            cur_deaths_per_hosp_65p = {{ dp.deaths_per_hosp_65p }}
+        {% endfor %}
+    end
+end
+
+def seed_contagion():
+    select(nodeset1, [n: node -> bool](n.covid.state == S))
+    sample(nodeset2, nodeset1, baseline_seed_prob, RELATIVE)
+    apply(nodeset2, [n: node]{ n.covid.state = E ; })
+end
+
+# REGION-vaccination.parquet
+# columns: tick,new_vax_count,high_risk_only,min_age,max_age,vax_campaign,vax_forumlation_tick
+# type:
+#   tick: int [0--741]
+#   new_vax_count: int
+#   high_risk_only: bool
+#   min_age: int
+#   max_age: int
+#   vax_campaign: int (>=1)
+#   vax_forumlation_tick: int (can be negative)
+
+def vaccinate_nodes():
+    {% for s in vax_schedule %}
+    if (CUR_TICK == {{ s.tick }}):
+        if ({{ s.high_risk_only }}) :
+            select(nodeset1, [v: node -> bool](
+                {{ s.min_age }} <= v.age and v.age < {{ s.max_age }}
+                and v.last_vax_campaign != {{ s.vax_campaign }}
+                and v.high_risk
+            ))
+        else:
+            select(nodeset1, [v: node -> bool](
+                {{ s.min_age }} <= v.age and v.age < {{ s.max_age }}
+                and v.last_vax_campaign != {{ s.vax_campaign }}
+            ))
+        end
+
+        sample(nodeset2, nodeset1, {{ s.new_vax_count }}, ABSOLUTE)
+        apply(nodeset2, [v: node]{
+            v.last_vax_tick = CUR_TICK
+            v.last_vax_formulation_tick = {{ s.vax_forumlation_tick }}
+            v.last_vax_campaign = {{ s.vax_campaign }}
+            v.covid.state = V
+        })
+    end
+    {% endfor %}
+end
+
+def update_last_infection_tick():
+    select(nodeset1, [v: node -> bool]( v.covid.state == E and not v.last_infection_tick_updated ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick = CUR_TICK
+        v.last_infection_tick_updated = True
+    })
+
+    select(nodeset1, [v: node -> bool]( v.covid.state != E and v.last_infection_tick_updated ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_updated = False
+    })
+end
+
+def update_new_hosp_count():
+    select(nodeset1, [v: node -> bool](
+        v.covid.state == H
+        and not v.included_in_new_hosp_count
+    ))
+
+    new_hosp_count <- reduce(nodeset1, [n: node -> int](1), +)
+
+    select(nodeset1, [v: node -> bool](
+        v.covid.state == H
+        and not v.included_in_new_hosp_count
+        and (CUR_TICK - v.last_vax_tick) < 365
+    ))
+
+    new_hosp_with_recent_vax_count <- reduce(nodeset1, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.included_in_new_hosp_count = True
+    })
+
+    select(nodeset1, [v: node -> bool]( v.covid.state != H and v.included_in_new_hosp_count ))
+
+    apply(nodeset1, [v: node]{
+        v.included_in_new_hosp_count = False
+    })
+end
+
+def intervene():
+    update_seasonality()
+    update_death_prob()
+    seed_contagion()
+    vaccinate_nodes()
+    update_last_infection_tick()
+    update_new_hosp_count()
+end

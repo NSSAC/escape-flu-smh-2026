@@ -1,0 +1,94 @@
+{
+ "name": "bt2023_VA",
+ "state": "VA",
+ "person_file": "data/person/bt2023/VA-person.parquet",
+ "n_particles": 128,
+ "_comment": "Backtest: fit the 2023-24 season, project 2024-25 out of sample. One continuous run per particle from 2023-08-06; the person file holds only history before that (2021-22/2022-23 campaigns, 2022-23 infections). See escape-flu-smh/py-modules/flu_smh/experiment.py for every field. Transmissibility priors: on the VA network R0 ~ 115 x tau (cryptic-round estimate, ~28 transmissions per tau per infectious-day x ~4.1 infectious-day equivalents), so the peak tau (baseline + seasonal) spans 0.004-0.020 (R0 ~0.5-2.3) and the off-season stays near or below R = 1.",
+ "anchor": "2023-08-06",
+ "end": "2025-06-28",
+ "fit_start": "2023-08-12",
+ "fit_end": "2024-06-29",
+ "proj_start": "2024-08-03",
+ "proj_end": "2025-06-28",
+ "season_break": "2024-08-04",
+ "campaigns": [
+  {
+   "season": "2023-24",
+   "campaign": 1
+  },
+  {
+   "season": "2024-25",
+   "campaign": 2
+  }
+ ],
+ "propensity_slack": 1.25,
+ "fixed": {
+  "tau_scale_A_H1N1": 1.0,
+  "tau_scale_A_H1N1_next": 1.0
+ },
+ "priors": {
+  "baseline_tau": [
+   0.002,
+   0.008,
+   "log"
+  ],
+  "tau_seasonality_scale": [
+   0.002,
+   0.012,
+   "lin"
+  ],
+  "seas_peak_tick": [
+   110.0,
+   200.0,
+   "lin"
+  ],
+  "seas_power": [
+   1.0,
+   4.0,
+   "lin"
+  ],
+  "baseline_seed_prob": [
+   3e-07,
+   3e-05,
+   "log"
+  ],
+  "tau_scale_A_H3N2": [
+   0.7,
+   1.4,
+   "lin"
+  ],
+  "tau_scale_B": [
+   0.6,
+   1.3,
+   "lin"
+  ],
+  "seed_w_A_H1N1": [
+   0.05,
+   1.0,
+   "lin"
+  ],
+  "seed_w_A_H3N2": [
+   0.05,
+   1.0,
+   "lin"
+  ],
+  "seed_w_B": [
+   0.05,
+   1.0,
+   "lin"
+  ],
+  "hosp_prob_scale": [
+   0.6,
+   2.0,
+   "log"
+  ]
+ },
+ "next_season": "sample",
+ "seed": 2023,
+ "likelihood": {
+  "nb_size": 20.0,
+  "subtype_weight": 1.0,
+  "subtype_neff": 200.0
+ },
+ "keep_h5": false
+}

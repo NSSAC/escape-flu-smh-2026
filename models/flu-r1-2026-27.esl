@@ -1,0 +1,1038 @@
+# SMH Flu Round 1 2026-27 -- ESCAPE-ABM influenza model, three subtypes
+#
+# Derived from covid19-r20.esl (COVID-19 Round 20). Kept: the per-agent immune clocks (last infection,
+# last vaccination, vaccine formulation), waning and immune escape, the transient V state on
+# vaccination, the seasonality-forced tau, and the Jinja-rendered vaccination schedule. Seasonality is
+# now a config-driven cosine (seas_peak_tick, seas_power), so calibration needs no rebuild. Changed for flu:
+#   * THREE contagions, one per subtype: flu_A_H1N1, flu_A_H3N2, flu_B. Outputs are
+#     <contagion>/state_count, /transitions, /transmissions, /interventions for each. (Names are
+#     C++ identifiers and HDF5 group names, so underscores, not hyphens: `flu-A-H1N1` fails to parse.)
+#   * vaccine-derived and infection-derived protection are SEPARATE terms, so the hub's VE (50% vs
+#     hospitalization) can be set directly instead of sharing one infection_ve with prior infection;
+#   * flu natural history and severity (first guesses, marked below);
+#   * no high-risk split (the flu round stratifies neither coverage nor outcomes by risk);
+#   * admissions counted once per hospital entry (fixes Round 20's census-like new_hosp_count);
+#   * vaccination selects agents not currently sick and moves only S to V (Round 20 moved A to V,
+#     which ended the infection). Optional targeting of habitual vaccinators through vax_propensity.
+# Removed: the double-peak machinery (winter_seasonality_scale, winter_split/end ticks,
+# in_winter_window), the time-varying death-prob parquet, the high-risk CHR multipliers, and the
+# COVID mid-trajectory initial state and burn-in (current_state, current_state_entry_tick,
+# burnin_infection_tick, seed_burnin, the infectivity ramp). Flu activity at tick 0 is near zero, so
+# the season starts from S plus immune history, and seeding carries it.
+#
+# SUBTYPES. What is shared and what is per subtype:
+#   shared       the vaccine (one trivalent shot: last_vax_tick / formulation, vax_level), the A(H1N1)
+#                severity ladder, natural-history distributions, seasonality, tau.
+#   per subtype  contagion state, infection clocks (last_infection_tick_<sub>, loaded from the person
+#                file; current_infection_tick_<sub>), admission flag, tau_scale_<sub>,
+#                seed_share_<sub>, relative IHR (hosp_rel_<sub>_<age>), in-hospital death
+#                (death_hosp_<sub>_<age>), and statistics.
+#   Infection-derived protection: homologous (infection_ve) plus a cross-protection matrix (xprot_*):
+#   the two A subtypes protect each other by 20%, A and B not at all. The person file carries a subtype-resolved history (flu-round1-2026-27
+#   burden_infections: NHSN admissions / subtype x age IHR, subtype mix by state from NREVSS and by age
+#   from FluView), so prior immunity differs by subtype and age. 
+#   Death in any subtype removes the agent from the other two (susceptibility 0, not vaccinated, not
+#   seeded). Co-infection with two subtypes at once is allowed.
+#
+# Specific ticks (tick 0 is a Sunday; epiweeks stay aligned)
+# sim_start_tick   = 0   : 2026-08-09   week before the Rd7 coverage curves start (2026-08-15)
+# calib_end_tick   = 55  : 2026-10-03   last day of calibration data
+# proj_start_tick  = 56  : 2026-10-04   first projected day (hub origin_date)
+# proj_end_tick    = 300 : 2027-06-05   35 weeks
+# The person file MUST be generated with this tick 0: flu-round1-2026-27 flu_data.ANCHOR = 2026-08-09.
+
+config baseline_tau: float = 0.014
+config tau_seasonality_scale: float = 0.0125
+config baseline_seed_prob: float = 1e-5
+
+# Per-subtype transmissibility multipliers (subtype dominance / antigenic novelty) and each subtype's
+# share of baseline_seed_prob. Defaults make the three subtypes identical and split seeding evenly.
+config tau_scale_A_H1N1: float = 1.0
+config tau_scale_A_H3N2: float = 1.0
+config tau_scale_B: float = 1.0
+config seed_share_A_H1N1: float = 0.3333
+config seed_share_A_H3N2: float = 0.3333
+config seed_share_B: float = 0.3333
+
+# Season blocks. From CUR_TICK >= season_break_tick the *_next values replace the ones above, so one run
+# can fit one season and project the next with a different subtype mix (flu_smh backtests). The default
+# 1e9 means never; the production run is a single season.
+config season_break_tick: float = 1000000000.0
+config tau_scale_A_H1N1_next: float = 1.0
+config tau_scale_A_H3N2_next: float = 1.0
+config tau_scale_B_next: float = 1.0
+config seed_share_A_H1N1_next: float = 0.3333
+config seed_share_A_H3N2_next: float = 0.3333
+config seed_share_B_next: float = 0.3333
+
+# Seasonal forcing (replaces the per-tick seasonality table):
+#   cur_seasonality = (0.5 * (1 + cos(2 pi (CUR_TICK - seas_peak_tick) / 365))) ^ seas_power
+# 1 at seas_peak_tick, 0 half a year away. seas_power > 1 sharpens the winter peak. Periodic, so a
+# two-season backtest gets two winters. Ticks are relative to tick 0: production (2026-08-09) 160 =
+# 2027-01-16; backtest (2023-08-06) 160 = 2024-01-13.
+config seas_peak_tick: float = 160.0
+config seas_power: float = 1.0
+
+config hosp_prob_scale: float = 1.0
+
+# Age-gradient knob: multiplies the 65+ rung of the IHR ladder only. hosp_prob_scale sets the LEVEL
+# of admissions and this sets their AGE SPLIT, one parameter per target (Round 20 needed it because
+# no transmission parameter moved the 0-64 / 65+ ratio). 1.0 = the ladder unchanged.
+config hosp_prob_65p_scale: float = 1.0
+
+# Fraction of infections that are symptomatic (E -> I; the rest go E -> A and are never hospitalized).
+# First guess. Commonly ~2/3 for influenza. The IHR ladder in hosp_prob is per INFECTION and is
+# divided by this, so changing it does not change admissions per infection.
+config symptomatic_frac: float = 0.67
+
+# The following cdose is obtained by solving the Wells-Riley model
+# p = 1.0 - exp(-cdose * t)
+# where p = 0.9 and t = 2 * 3600
+config cdose: float = 3.198035e-04
+
+# --- Immunity ----------------------------------------------------------------------------------
+# Two sources, combined multiplicatively (independent protection). For subtype <sub>:
+#
+#   susceptibility = (1 - vax_infection_ve * vax_level) * (1 - infection_ve * inf_level_<sub>)
+#   hosp_prob     *= (1 - vax_hosp_ve * vax_level) * (1 - infection_hosp_ve * inf_level_<sub>)
+#
+# with  vax_level       = waning since last_vax_tick x escape since last_vax_formulation_tick
+#       inf_level_<sub> = waning and escape since last_infection_tick_<sub>
+# (each 0 if the event never happened). R carries full protection against its own subtype for its
+# dwell; these terms govern protection after R -> S and from the person file's prior-season events.
+
+# Antigenic drift: 30% per year, for both vaccine- and infection-derived immunity. First guess.
+# 1 - immune_escape_per_day ** 365 = .30
+# immune_escape_per_day = (1 - .30) ** (1.0 / 365)
+config immune_escape_per_day: float = 9.990233e-01
+
+# Vaccine. Hub: VE 50% against medically attended illness and hospitalization, all ages, all
+# scenarios. VE against infection is our choice and should be lower (the hub cites 21% household,
+# 31% community, both "optimistic"). Total VE vs hospitalization = 1 - (1 - 0.25)(1 - 0.3333) = 0.50.
+# Waning and escape pull the in-season average below 50%; tune these, as Round 20 did, so the
+# realized VE hits the target over the season.
+config vax_infection_ve: float = 0.25
+config vax_hosp_ve: float = 0.3333
+
+# Vaccine waning (Ferdinands et al. 2017: VE declines over a season). Half-life 150 days.
+# vax_waning_per_day = 0.5 ** (1.0 / 150)
+config vax_waning_per_day: float = 9.953897e-01
+
+# Prior infection: protection against reinfection, once out of R. First guess.
+# Half-life 365 days, so a 2025-26 infection keeps ~0.32 protection at 2026-10-04 after drift.
+# infection_waning_per_day = 0.5 ** (1.0 / 365)
+config infection_ve: float = 0.70
+config infection_waning_per_day: float = 9.981028e-01
+# Extra protection against hospitalization given reinfection. 0 = none (a no-op).
+config infection_hosp_ve: float = 0.0
+
+# Cross-protection matrix: protection against infection with <to> from a prior <from> infection, at full
+# strength. It wanes and drifts with the same kernel as homologous protection (inf_level). The diagonal is
+# infection_ve. The two influenza A subtypes protect each other by 20%; A and B do not cross-protect.
+#
+#                 to A_H1N1      to A_H3N2      to B
+#   from A_H1N1   infection_ve   0.20           0
+#   from A_H3N2   0.20           infection_ve   0
+#   from B        0              0              infection_ve
+config xprot_A_H1N1_to_A_H3N2: float = 0.20
+config xprot_A_H3N2_to_A_H1N1: float = 0.20
+config xprot_A_H1N1_to_B: float = 0.0
+config xprot_A_H3N2_to_B: float = 0.0
+config xprot_B_to_A_H1N1: float = 0.0
+config xprot_B_to_A_H3N2: float = 0.0
+
+# --- Severity by subtype -----------------------------------------------------------------------
+# Source: flu-round1-2026-27 notebooks/subtype_severity.py + burden_infections.py ->
+# data/processed/infections/model_esl_params.csv (see burden_infections.ipynb section 8).
+#
+# P(hosp | infection) = the A(H1N1) ladder in hosp_prob_core x hosp_rel_<sub>_<age>.
+# The relative IHRs are WITHIN-AGE: FluSurv-NET 2010-19 hospitalizations by subtype (Sumner et al.,
+# Lancet Microbe 2023) over catchment infections by subtype (CDC burden-model inputs x NREVSS for the
+# 13 study states, tilted by age with FluView public-health-lab ages). Within an age band, H3N2 and B
+# are no more likely than H1N1 to put an infected person in hospital. H3N2's larger all-age burden
+# (~1.4x) comes from infecting older people, which the age ladder plus the person file's
+# subtype-by-age history already carry. Do NOT add an all-age H3N2 multiplier on top.
+# 0-4 and 5-17 share the study's 0-17 value.
+config hosp_rel_A_H3N2_0_17: float = 0.755967
+config hosp_rel_A_H3N2_18_49: float = 0.842433
+config hosp_rel_A_H3N2_50_64: float = 0.886064
+config hosp_rel_A_H3N2_65p: float = 0.932674
+config hosp_rel_B_0_17: float = 0.689894
+config hosp_rel_B_18_49: float = 0.747056
+config hosp_rel_B_50_64: float = 0.800375
+config hosp_rel_B_65p: float = 0.954145
+
+# P(death | hospitalized), in-hospital, by subtype and age: FluSurv-NET in-hospital deaths /
+# hospitalizations 2010-19 by age (CDC burden-model inputs), split across subtypes with Sumner et al.'s
+# age-specific adjusted ORs vs H3N2 (overall: H1N1 1.25, B 1.18). H1N1 is the deadliest once in
+# hospital, at 18-64 most of all; B in children. Deaths are an optional, national-only hub target
+# (the CDC multiplier model also counts out-of-hospital deaths), so death_prob_scale is the knob.
+config death_hosp_A_H1N1_0_17: float = 0.004963
+config death_hosp_A_H1N1_18_49: float = 0.020443
+config death_hosp_A_H1N1_50_64: float = 0.036062
+config death_hosp_A_H1N1_65p: float = 0.039094
+config death_hosp_A_H3N2_0_17: float = 0.003793
+config death_hosp_A_H3N2_18_49: float = 0.011399
+config death_hosp_A_H3N2_50_64: float = 0.024493
+config death_hosp_A_H3N2_65p: float = 0.037302
+config death_hosp_B_0_17: float = 0.009616
+config death_hosp_B_18_49: float = 0.015774
+config death_hosp_B_50_64: float = 0.027114
+config death_hosp_B_65p: float = 0.042659
+config death_prob_scale: float = 1.0
+
+# --- Statistics (recorded after intervene() each tick; NOT reset by the engine, so each is
+# assigned every tick) ----------------------------------------------------------------------------
+# new_hosp_count_<sub>             admissions of that subtype, each hospital entry counted once.
+#                                  intervene() runs before the tick's transitions, so the value at
+#                                  tick t is the admissions of tick t-1 (verified in the single-
+#                                  contagion version: equals transitions -> H shifted by one tick,
+#                                  exactly). Shift by 1 before making epiweeks.
+# new_hosp_count                   all subtypes (the hub target is all influenza)
+# new_hosp_with_recent_vax_count   of all admissions, vaccinated within the last 365 days
+# susceptible_mass_<sub>           sum over S and V agents of that subtype's susceptibility. Divided by
+#                                  the population, this is the per-subtype S0 (hub optional targets
+#                                  S0_AH1, S0_AH3, S0_B); the required all-subtype S0 weights these by
+#                                  each subtype's share of cumulative infections at the end of the run.
+#                                  Read at proj_start_tick.
+statistic new_hosp_count: int = 0
+statistic new_hosp_count_A_H1N1: int = 0
+statistic new_hosp_count_A_H3N2: int = 0
+statistic new_hosp_count_B: int = 0
+statistic new_hosp_with_recent_vax_count: int = 0
+statistic susceptible_mass_A_H1N1: float = 0.0
+statistic susceptible_mass_A_H3N2: float = 0.0
+statistic susceptible_mass_B: float = 0.0
+
+global NEG_INFTY: int = -999999
+
+global cur_seasonality: float = 0.0
+
+# the season block in force this tick (update_season_block)
+global cur_tau_scale_A_H1N1: float = 1.0
+global cur_tau_scale_A_H3N2: float = 1.0
+global cur_tau_scale_B: float = 1.0
+global cur_seed_share_A_H1N1: float = 0.3333
+global cur_seed_share_A_H3N2: float = 0.3333
+global cur_seed_share_B: float = 0.3333
+
+# per-subtype admissions with a recent vaccination, summed into new_hosp_with_recent_vax_count
+global recent_vax_hosp_A_H1N1: int = 0
+global recent_vax_hosp_A_H3N2: int = 0
+global recent_vax_hosp_B: int = 0
+
+# One state type, shared by the three contagions.
+enum flu_state_t
+    S, # Susceptible
+    V, # Vaccinated this tick (transient marker; returns to S after 1 tick)
+    E, # Exposed
+    I, # Infectious (symptomatic)
+    A, # Infectious (asymptomatic)
+    H, # Hospitalized
+    D, # Dead
+    R  # Recovered (fully protected against this subtype for its dwell)
+end
+
+# REGION-person.parquet (flu-round1-2026-27/data/person, built by notebooks/run_person_parquets.py)
+# columns read: pid,age,vax_propensity,last_vax_tick,last_vax_formulation_tick,
+#               last_infection_tick_A_H1N1,last_infection_tick_A_H3N2,last_infection_tick_B
+# (the file also carries county_fips, last_infection_tick (any subtype) and per-season vax_tick_* /
+# inf_tick_*, unused here)
+# type:
+#   pid: int
+#   age: int
+#   vax_propensity: float (latent propensity z; LOW z = habitual vaccinator)
+#   last_vax_tick: int (negative, or NEG_INFTY = never)
+#   last_vax_formulation_tick: int (negative, or NEG_INFTY = never)
+#   last_infection_tick_<sub>: int (negative, or NEG_INFTY = never in the 2022-10 .. tick-0 window)
+# The tick fields MUST stay i32: NEG_INFTY = -999999 does not fit in an i16.
+
+node
+    pid: int node key
+    age: i8 static
+    vax_propensity: float static
+    last_vax_tick: i32 static
+    last_vax_formulation_tick: i32 static
+    last_infection_tick_A_H1N1: i32 static
+    last_infection_tick_A_H3N2: i32 static
+    last_infection_tick_B: i32 static
+
+    # Campaign id of the node's most recent in-sim vaccination (0 = none in-sim).
+    last_vax_campaign: i8
+
+    # Per-subtype infection clocks. last_infection_tick_<sub> (static above) is loaded from the person
+    # file and then tracks that subtype's in-sim infections (static fields are assignable).
+    # current_infection_tick_<sub> is the onset of the episode in progress, promoted to
+    # last_infection_tick_<sub> on entry to S/V/R, so that severity during E/I/H keeps seeing the
+    # *previous* episode's immunity instead of resetting the waning clock to the infection being
+    # evaluated.
+    current_infection_tick_A_H1N1: i32
+    current_infection_tick_updated_A_H1N1: bool
+    last_infection_tick_updated_A_H1N1: bool
+    counted_admission_A_H1N1: bool
+
+    current_infection_tick_A_H3N2: i32
+    current_infection_tick_updated_A_H3N2: bool
+    last_infection_tick_updated_A_H3N2: bool
+    counted_admission_A_H3N2: bool
+
+    current_infection_tick_B: i32
+    current_infection_tick_updated_B: bool
+    last_infection_tick_updated_B: bool
+    counted_admission_B: bool
+end
+
+edge
+    targetPID: int target node key
+    sourcePID: int source node key
+    duration: int static
+end
+
+# --- Immunity kernels ------------------------------------------------------------------------------
+
+def vax_level(v: node) -> float:
+    var lvl: float = 0.0
+    if v.last_vax_tick > NEG_INFTY:
+        lvl = pow(vax_waning_per_day, CUR_TICK - v.last_vax_tick)
+        lvl *= pow(immune_escape_per_day, CUR_TICK - v.last_vax_formulation_tick)
+    end
+    return lvl
+end
+
+# Infection-derived protection remaining from an infection at `inf_tick` (0 if never).
+def inf_level(inf_tick: int) -> float:
+    var lvl: float = 0.0
+    if inf_tick > NEG_INFTY:
+        lvl = pow(infection_waning_per_day, CUR_TICK - inf_tick)
+        lvl *= pow(immune_escape_per_day, CUR_TICK - inf_tick)
+    end
+    return lvl
+end
+
+# Dead in any subtype.
+def is_dead(v: node) -> bool:
+    return v.flu_A_H1N1.state == D or v.flu_A_H3N2.state == D or v.flu_B.state == D
+end
+
+# --- Natural history and severity --------------------------------------------------------------
+
+def p_symptomatic(v: node) -> float:
+    return symptomatic_frac
+end
+def p_asymptomatic(v: node) -> float:
+    return 1.0 - symptomatic_frac
+end
+
+# P(hosp | symptomatic) for subtype <sub>, given its last infection tick and its within-age relative IHR.
+# Wrapped per subtype below, because a transition probability must be a one-argument node function.
+def hosp_prob_core(v: node, inf_tick: int, rel: float) -> float:
+    var ihr: float = 0.0
+    var prob: float = 0.0
+
+    # A(H1N1) NHSN admissions per INFECTION, by NHSN age band (model_esl_params.csv: r_a x FluSurv-NET
+    # IHR, the same IHRs that back-calculate the person file's infection histories, so the ladder and
+    # the histories are consistent by construction). Converted to P(hosp | symptomatic) since it is
+    # applied at I -> H. These are observed rates, which already include the population's vaccine
+    # protection; (1 - VE) is applied again below, so hosp_prob_scale will sit slightly above 1.
+    if v.age <= 4:
+        ihr = 0.005780
+    elif v.age <= 17:
+        ihr = 0.003607
+    elif v.age <= 49:
+        ihr = 0.004562
+    elif v.age <= 64:
+        ihr = 0.008232
+    else:
+        ihr = 0.058157 * hosp_prob_65p_scale
+    end
+    prob = ihr * rel / symptomatic_frac
+
+    prob *= 1.0 - vax_hosp_ve * vax_level(v)
+    prob *= 1.0 - infection_hosp_ve * inf_level(inf_tick)
+    prob *= hosp_prob_scale
+
+    return min(prob, 1.0)
+end
+
+def hosp_rel_A_H3N2(v: node) -> float:
+    var r: float = hosp_rel_A_H3N2_65p
+    if v.age <= 17:
+        r = hosp_rel_A_H3N2_0_17
+    elif v.age <= 49:
+        r = hosp_rel_A_H3N2_18_49
+    elif v.age <= 64:
+        r = hosp_rel_A_H3N2_50_64
+    end
+    return r
+end
+
+def hosp_rel_B(v: node) -> float:
+    var r: float = hosp_rel_B_65p
+    if v.age <= 17:
+        r = hosp_rel_B_0_17
+    elif v.age <= 49:
+        r = hosp_rel_B_18_49
+    elif v.age <= 64:
+        r = hosp_rel_B_50_64
+    end
+    return r
+end
+
+def hosp_prob_A_H1N1(v: node) -> float:
+    return hosp_prob_core(v, v.last_infection_tick_A_H1N1, 1.0)
+end
+def not_hosp_prob_A_H1N1(v: node) -> float:
+    return 1.0 - hosp_prob_A_H1N1(v)
+end
+
+def hosp_prob_A_H3N2(v: node) -> float:
+    return hosp_prob_core(v, v.last_infection_tick_A_H3N2, hosp_rel_A_H3N2(v))
+end
+def not_hosp_prob_A_H3N2(v: node) -> float:
+    return 1.0 - hosp_prob_A_H3N2(v)
+end
+
+def hosp_prob_B(v: node) -> float:
+    return hosp_prob_core(v, v.last_infection_tick_B, hosp_rel_B(v))
+end
+def not_hosp_prob_B(v: node) -> float:
+    return 1.0 - hosp_prob_B(v)
+end
+
+def death_prob_A_H1N1(v: node) -> float:
+    var p: float = death_hosp_A_H1N1_65p
+    if v.age <= 17:
+        p = death_hosp_A_H1N1_0_17
+    elif v.age <= 49:
+        p = death_hosp_A_H1N1_18_49
+    elif v.age <= 64:
+        p = death_hosp_A_H1N1_50_64
+    end
+    return min(p * death_prob_scale, 1.0)
+end
+def not_death_prob_A_H1N1(v: node) -> float:
+    return 1.0 - death_prob_A_H1N1(v)
+end
+
+def death_prob_A_H3N2(v: node) -> float:
+    var p: float = death_hosp_A_H3N2_65p
+    if v.age <= 17:
+        p = death_hosp_A_H3N2_0_17
+    elif v.age <= 49:
+        p = death_hosp_A_H3N2_18_49
+    elif v.age <= 64:
+        p = death_hosp_A_H3N2_50_64
+    end
+    return min(p * death_prob_scale, 1.0)
+end
+def not_death_prob_A_H3N2(v: node) -> float:
+    return 1.0 - death_prob_A_H3N2(v)
+end
+
+def death_prob_B(v: node) -> float:
+    var p: float = death_hosp_B_65p
+    if v.age <= 17:
+        p = death_hosp_B_0_17
+    elif v.age <= 49:
+        p = death_hosp_B_18_49
+    elif v.age <= 64:
+        p = death_hosp_B_50_64
+    end
+    return min(p * death_prob_scale, 1.0)
+end
+def not_death_prob_B(v: node) -> float:
+    return 1.0 - death_prob_B(v)
+end
+
+distribution
+    # Hospital stay and admission-to-death: inherited from covid19-r20.esl. They shape only the
+    # H census and death timing, not admissions.
+    discrete hosp_dwell_time
+        p = 0.70, v = 1
+        p = 0.10, v = 2
+        p = 0.09, v = 3
+        p = 0.04, v = 4
+        p = 0.03, v = 5
+        p = 0.02, v = 6
+        p = 0.02, v = 7
+    end
+
+    discrete hosp_to_death
+        p = 0.03, v = 3
+        p = 0.07, v = 4
+        p = 0.12, v = 5
+        p = 0.15, v = 6
+        p = 0.15, v = 7
+        p = 0.14, v = 8
+        p = 0.11, v = 9
+        p = 0.08, v = 10
+        p = 0.06, v = 11
+        p = 0.04, v = 12
+        p = 0.03, v = 13
+        p = 0.02, v = 14
+    end
+
+    # Infectious period, 2 - 7 days; mean 4.1. First guess for influenza.
+    discrete infectious_dwell_time
+        p = 0.10, v = 2
+        p = 0.25, v = 3
+        p = 0.30, v = 4
+        p = 0.20, v = 5
+        p = 0.10, v = 6
+        p = 0.05, v = 7
+    end
+
+    # Latent period, 1 - 3 days; mean 1.75. First guess for influenza.
+    discrete exposed_dwell_time
+        p = 0.40, v = 1
+        p = 0.45, v = 2
+        p = 0.15, v = 3
+    end
+
+    # Post-infection protection against the same subtype for the rest of the season: mean ~6 months,
+    # sd 1 month. After R -> S, infection_ve / inf_level take over.
+    normal recovered_dwell_time
+        mean = 180, std = 30
+    end
+end
+
+# --- Contagion: influenza A(H1N1) ----------------------------------------------------------------
+
+contagion flu_A_H1N1
+    state type flu_state_t
+
+    transition
+        V -> S, dwell = 1.0
+
+        E -> I, p = p_symptomatic, dwell = exposed_dwell_time
+        E -> A, p = p_asymptomatic, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob_A_H1N1, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob_A_H1N1, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob_A_H1N1, dwell = hosp_to_death
+        H -> R, p = not_death_prob_A_H1N1, dwell = hosp_dwell_time
+
+        R -> S, dwell = recovered_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+
+        E => V -> E
+        A => V -> E
+        I => V -> E
+    end
+
+    susceptibility flu_A_H1N1_susceptibility
+    infectivity flu_A_H1N1_infectivity
+    transmissibility flu_A_H1N1_transmissibility
+    enabled flu_enabled
+end
+
+def flu_A_H1N1_susceptibility(v: node) -> float:
+    var s: float = 0.0
+    if not is_dead(v):
+        s = 1.0 - vax_infection_ve * vax_level(v)
+        s *= 1.0 - infection_ve * inf_level(v.last_infection_tick_A_H1N1)
+        s *= 1.0 - xprot_A_H3N2_to_A_H1N1 * inf_level(v.last_infection_tick_A_H3N2)
+        s *= 1.0 - xprot_B_to_A_H1N1 * inf_level(v.last_infection_tick_B)
+    end
+    return s
+end
+
+def flu_A_H1N1_infectivity(v: node) -> float:
+    var i: float = 0.0
+
+    # Relative infectiousness, inherited from covid19-r20.esl. First guess.
+    switch v.flu_A_H1N1.state:
+        case E: i = 0.4
+        case I: i = 1.0
+        case A: i = 0.5
+    end
+
+    return i
+end
+
+def flu_A_H1N1_transmissibility(e: edge) -> float:
+    var tau: float = (baseline_tau + tau_seasonality_scale * cur_seasonality) * cur_tau_scale_A_H1N1
+    tau *= (1.0 - exp(-cdose * e.duration))
+    return tau
+end
+
+# --- Contagion: influenza A(H3N2) ----------------------------------------------------------------
+
+contagion flu_A_H3N2
+    state type flu_state_t
+
+    transition
+        V -> S, dwell = 1.0
+
+        E -> I, p = p_symptomatic, dwell = exposed_dwell_time
+        E -> A, p = p_asymptomatic, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob_A_H3N2, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob_A_H3N2, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob_A_H3N2, dwell = hosp_to_death
+        H -> R, p = not_death_prob_A_H3N2, dwell = hosp_dwell_time
+
+        R -> S, dwell = recovered_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+
+        E => V -> E
+        A => V -> E
+        I => V -> E
+    end
+
+    susceptibility flu_A_H3N2_susceptibility
+    infectivity flu_A_H3N2_infectivity
+    transmissibility flu_A_H3N2_transmissibility
+    enabled flu_enabled
+end
+
+def flu_A_H3N2_susceptibility(v: node) -> float:
+    var s: float = 0.0
+    if not is_dead(v):
+        s = 1.0 - vax_infection_ve * vax_level(v)
+        s *= 1.0 - infection_ve * inf_level(v.last_infection_tick_A_H3N2)
+        s *= 1.0 - xprot_A_H1N1_to_A_H3N2 * inf_level(v.last_infection_tick_A_H1N1)
+        s *= 1.0 - xprot_B_to_A_H3N2 * inf_level(v.last_infection_tick_B)
+    end
+    return s
+end
+
+def flu_A_H3N2_infectivity(v: node) -> float:
+    var i: float = 0.0
+
+    # Relative infectiousness, inherited from covid19-r20.esl. First guess.
+    switch v.flu_A_H3N2.state:
+        case E: i = 0.4
+        case I: i = 1.0
+        case A: i = 0.5
+    end
+
+    return i
+end
+
+def flu_A_H3N2_transmissibility(e: edge) -> float:
+    var tau: float = (baseline_tau + tau_seasonality_scale * cur_seasonality) * cur_tau_scale_A_H3N2
+    tau *= (1.0 - exp(-cdose * e.duration))
+    return tau
+end
+
+# --- Contagion: influenza B --------------------------------------------------------------------
+
+contagion flu_B
+    state type flu_state_t
+
+    transition
+        V -> S, dwell = 1.0
+
+        E -> I, p = p_symptomatic, dwell = exposed_dwell_time
+        E -> A, p = p_asymptomatic, dwell = exposed_dwell_time
+
+        A -> R, dwell = infectious_dwell_time
+        I -> H, p = hosp_prob_B, dwell = infectious_dwell_time
+        I -> R, p = not_hosp_prob_B, dwell = infectious_dwell_time
+
+        H -> D, p = death_prob_B, dwell = hosp_to_death
+        H -> R, p = not_death_prob_B, dwell = hosp_dwell_time
+
+        R -> S, dwell = recovered_dwell_time
+    end
+
+    transmission
+        E => S -> E
+        A => S -> E
+        I => S -> E
+
+        E => V -> E
+        A => V -> E
+        I => V -> E
+    end
+
+    susceptibility flu_B_susceptibility
+    infectivity flu_B_infectivity
+    transmissibility flu_B_transmissibility
+    enabled flu_enabled
+end
+
+def flu_B_susceptibility(v: node) -> float:
+    var s: float = 0.0
+    if not is_dead(v):
+        s = 1.0 - vax_infection_ve * vax_level(v)
+        s *= 1.0 - infection_ve * inf_level(v.last_infection_tick_B)
+        s *= 1.0 - xprot_A_H1N1_to_B * inf_level(v.last_infection_tick_A_H1N1)
+        s *= 1.0 - xprot_A_H3N2_to_B * inf_level(v.last_infection_tick_A_H3N2)
+    end
+    return s
+end
+
+def flu_B_infectivity(v: node) -> float:
+    var i: float = 0.0
+
+    # Relative infectiousness, inherited from covid19-r20.esl. First guess.
+    switch v.flu_B.state:
+        case E: i = 0.4
+        case I: i = 1.0
+        case A: i = 0.5
+    end
+
+    return i
+end
+
+def flu_B_transmissibility(e: edge) -> float:
+    var tau: float = (baseline_tau + tau_seasonality_scale * cur_seasonality) * cur_tau_scale_B
+    tau *= (1.0 - exp(-cdose * e.duration))
+    return tau
+end
+
+def flu_enabled(e: edge) -> bool:
+    return True
+end
+
+# We use generic names for nodesets.
+# The will be reused in the different interventions.
+nodeset nodeset1, nodeset2
+
+# Seasonal forcing from configs (see seas_peak_tick); shared by all subtypes, which tau_scale_<sub> scales.
+def update_seasonality():
+    var x: float = 0.5 * (1.0 + cos(6.283185307179586 * (CUR_TICK - seas_peak_tick) / 365.0))
+    cur_seasonality = pow(x, seas_power)
+end
+
+def update_season_block():
+    if CUR_TICK < season_break_tick:
+        cur_tau_scale_A_H1N1 = tau_scale_A_H1N1
+        cur_tau_scale_A_H3N2 = tau_scale_A_H3N2
+        cur_tau_scale_B = tau_scale_B
+        cur_seed_share_A_H1N1 = seed_share_A_H1N1
+        cur_seed_share_A_H3N2 = seed_share_A_H3N2
+        cur_seed_share_B = seed_share_B
+    else:
+        cur_tau_scale_A_H1N1 = tau_scale_A_H1N1_next
+        cur_tau_scale_A_H3N2 = tau_scale_A_H3N2_next
+        cur_tau_scale_B = tau_scale_B_next
+        cur_seed_share_A_H1N1 = seed_share_A_H1N1_next
+        cur_seed_share_A_H3N2 = seed_share_A_H3N2_next
+        cur_seed_share_B = seed_share_B_next
+    end
+end
+
+def seed_contagion():
+    select(nodeset1, [n: node -> bool](n.flu_A_H1N1.state == S and not is_dead(n)))
+    sample(nodeset2, nodeset1, baseline_seed_prob * cur_seed_share_A_H1N1, RELATIVE)
+    apply(nodeset2, [n: node]{ n.flu_A_H1N1.state = E ; })
+
+    select(nodeset1, [n: node -> bool](n.flu_A_H3N2.state == S and not is_dead(n)))
+    sample(nodeset2, nodeset1, baseline_seed_prob * cur_seed_share_A_H3N2, RELATIVE)
+    apply(nodeset2, [n: node]{ n.flu_A_H3N2.state = E ; })
+
+    select(nodeset1, [n: node -> bool](n.flu_B.state == S and not is_dead(n)))
+    sample(nodeset2, nodeset1, baseline_seed_prob * cur_seed_share_B, RELATIVE)
+    apply(nodeset2, [n: node]{ n.flu_B.state = E ; })
+end
+
+# Not currently sick or dead in any subtype: S, V, E, A or R in all three. Vaccination eligibility.
+def can_vaccinate(v: node) -> bool:
+    var ok: bool = True
+    if v.flu_A_H1N1.state == I or v.flu_A_H1N1.state == H or v.flu_A_H1N1.state == D:
+        ok = False
+    end
+    if v.flu_A_H3N2.state == I or v.flu_A_H3N2.state == H or v.flu_A_H3N2.state == D:
+        ok = False
+    end
+    if v.flu_B.state == I or v.flu_B.state == H or v.flu_B.state == D:
+        ok = False
+    end
+    return ok
+end
+
+# REGION-SCENARIO-vaccination.parquet (scenario D: an empty schedule)
+# columns: tick,new_vax_count,min_age,max_age,vax_campaign,vax_formulation_tick,propensity_max
+# type:
+#   tick: int [0--300]
+#   new_vax_count: int
+#   min_age: int
+#   max_age: int (exclusive)
+#   vax_campaign: int (>=1)
+#   vax_formulation_tick: int (can be negative; escape clock for this campaign)
+#   propensity_max: float (only agents with vax_propensity < this are eligible. Set it to the band's
+#                   final-coverage quantile to put the campaign on habitual vaccinators, or to a
+#                   large value such as 99.0 for no targeting. Keep it identical across scenarios
+#                   so they stay paired.)
+#
+# One trivalent vaccine: a vaccination sets the shared clocks, and moves the agent to V in every
+# subtype where it is S. Agents incubating or asymptomatic (E/A) or recovered (R) in a subtype are
+# vaccinated but stay in that state: vaccinating must not end an infection or remove protection.
+
+def vaccinate_nodes():
+    {% for s in vax_schedule %}
+    if (CUR_TICK == {{ s.tick }}):
+        select(nodeset1, [v: node -> bool](
+            {{ s.min_age }} <= v.age and v.age < {{ s.max_age }}
+            and v.last_vax_campaign != {{ s.vax_campaign }}
+            and v.vax_propensity < {{ s.propensity_max }}
+            and can_vaccinate(v)
+        ))
+
+        sample(nodeset2, nodeset1, {{ s.new_vax_count }}, ABSOLUTE)
+        apply(nodeset2, [v: node]{
+            v.last_vax_tick = CUR_TICK
+            v.last_vax_formulation_tick = {{ s.vax_formulation_tick }}
+            v.last_vax_campaign = {{ s.vax_campaign }}
+        })
+    end
+    {% endfor %}
+
+    select(nodeset1, [v: node -> bool](v.flu_A_H1N1.state == S and v.last_vax_tick == CUR_TICK))
+    apply(nodeset1, [v: node]{ v.flu_A_H1N1.state = V ; })
+    select(nodeset1, [v: node -> bool](v.flu_A_H3N2.state == S and v.last_vax_tick == CUR_TICK))
+    apply(nodeset1, [v: node]{ v.flu_A_H3N2.state = V ; })
+    select(nodeset1, [v: node -> bool](v.flu_B.state == S and v.last_vax_tick == CUR_TICK))
+    apply(nodeset1, [v: node]{ v.flu_B.state = V ; })
+end
+
+def init_node_state():
+    # Once, at tick 0. Every node starts in S in every subtype (the default); the immune history is
+    # in the static clocks loaded from the person file. One assignment per subtype, load-bearing
+    # (carried from covid19-r20.esl):
+    #
+    #   v.current_infection_tick_<sub> = v.last_infection_tick_<sub>   (NOT NEG_INFTY)
+    #       update_infection_ticks_<sub>() promotes last_infection_tick_<sub> <- current_infection_tick_<sub>
+    #       for every S/V/R node on tick 0. Seeding it to NEG_INFTY would ERASE the loaded infection
+    #       history of the whole population on the first tick.
+    apply(ALL_NODES, [v: node]{
+        v.current_infection_tick_A_H1N1 = v.last_infection_tick_A_H1N1
+        v.current_infection_tick_A_H3N2 = v.last_infection_tick_A_H3N2
+        v.current_infection_tick_B = v.last_infection_tick_B
+    })
+end
+
+def update_infection_ticks_A_H1N1():
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H1N1.state == E
+        and not v.current_infection_tick_updated_A_H1N1
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_A_H1N1 = CUR_TICK
+        v.current_infection_tick_updated_A_H1N1 = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H1N1.state != E
+        and v.current_infection_tick_updated_A_H1N1
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_updated_A_H1N1 = False
+    })
+
+    select(nodeset1, [v: node -> bool](
+        (v.flu_A_H1N1.state == S or v.flu_A_H1N1.state == V or v.flu_A_H1N1.state == R)
+        and not v.last_infection_tick_updated_A_H1N1
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_A_H1N1 = v.current_infection_tick_A_H1N1
+        v.last_infection_tick_updated_A_H1N1 = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        not (v.flu_A_H1N1.state == S or v.flu_A_H1N1.state == V or v.flu_A_H1N1.state == R)
+        and v.last_infection_tick_updated_A_H1N1
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_updated_A_H1N1 = False
+    })
+end
+
+def update_infection_ticks_A_H3N2():
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H3N2.state == E
+        and not v.current_infection_tick_updated_A_H3N2
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_A_H3N2 = CUR_TICK
+        v.current_infection_tick_updated_A_H3N2 = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H3N2.state != E
+        and v.current_infection_tick_updated_A_H3N2
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_updated_A_H3N2 = False
+    })
+
+    select(nodeset1, [v: node -> bool](
+        (v.flu_A_H3N2.state == S or v.flu_A_H3N2.state == V or v.flu_A_H3N2.state == R)
+        and not v.last_infection_tick_updated_A_H3N2
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_A_H3N2 = v.current_infection_tick_A_H3N2
+        v.last_infection_tick_updated_A_H3N2 = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        not (v.flu_A_H3N2.state == S or v.flu_A_H3N2.state == V or v.flu_A_H3N2.state == R)
+        and v.last_infection_tick_updated_A_H3N2
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_updated_A_H3N2 = False
+    })
+end
+
+def update_infection_ticks_B():
+    select(nodeset1, [v: node -> bool](
+        v.flu_B.state == E
+        and not v.current_infection_tick_updated_B
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_B = CUR_TICK
+        v.current_infection_tick_updated_B = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        v.flu_B.state != E
+        and v.current_infection_tick_updated_B
+    ))
+    apply(nodeset1, [v: node]{
+        v.current_infection_tick_updated_B = False
+    })
+
+    select(nodeset1, [v: node -> bool](
+        (v.flu_B.state == S or v.flu_B.state == V or v.flu_B.state == R)
+        and not v.last_infection_tick_updated_B
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_B = v.current_infection_tick_B
+        v.last_infection_tick_updated_B = True
+    })
+
+    select(nodeset1, [v: node -> bool](
+        not (v.flu_B.state == S or v.flu_B.state == V or v.flu_B.state == R)
+        and v.last_infection_tick_updated_B
+    ))
+    apply(nodeset1, [v: node]{
+        v.last_infection_tick_updated_B = False
+    })
+end
+
+# Admissions this tick, per subtype: nodes in H not yet counted. The flag is cleared on leaving H,
+# so a later reinfection (R -> S -> ... -> H) is counted again. Round 20 flagged only the recent-vax
+# subset, which turned new_hosp_count into a lagged census.
+def update_new_hosp_count_A_H1N1():
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H1N1.state == H
+        and not v.counted_admission_A_H1N1
+    ))
+    new_hosp_count_A_H1N1 <- reduce(nodeset1, [n: node -> int](1), +)
+
+    select(nodeset2, [v: node -> bool](
+        v.flu_A_H1N1.state == H
+        and not v.counted_admission_A_H1N1
+        and (CUR_TICK - v.last_vax_tick) < 365
+    ))
+    recent_vax_hosp_A_H1N1 <- reduce(nodeset2, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.counted_admission_A_H1N1 = True
+    })
+
+    select(nodeset1, [v: node -> bool](v.flu_A_H1N1.state != H and v.counted_admission_A_H1N1))
+    apply(nodeset1, [v: node]{
+        v.counted_admission_A_H1N1 = False
+    })
+end
+
+def update_new_hosp_count_A_H3N2():
+    select(nodeset1, [v: node -> bool](
+        v.flu_A_H3N2.state == H
+        and not v.counted_admission_A_H3N2
+    ))
+    new_hosp_count_A_H3N2 <- reduce(nodeset1, [n: node -> int](1), +)
+
+    select(nodeset2, [v: node -> bool](
+        v.flu_A_H3N2.state == H
+        and not v.counted_admission_A_H3N2
+        and (CUR_TICK - v.last_vax_tick) < 365
+    ))
+    recent_vax_hosp_A_H3N2 <- reduce(nodeset2, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.counted_admission_A_H3N2 = True
+    })
+
+    select(nodeset1, [v: node -> bool](v.flu_A_H3N2.state != H and v.counted_admission_A_H3N2))
+    apply(nodeset1, [v: node]{
+        v.counted_admission_A_H3N2 = False
+    })
+end
+
+def update_new_hosp_count_B():
+    select(nodeset1, [v: node -> bool](
+        v.flu_B.state == H
+        and not v.counted_admission_B
+    ))
+    new_hosp_count_B <- reduce(nodeset1, [n: node -> int](1), +)
+
+    select(nodeset2, [v: node -> bool](
+        v.flu_B.state == H
+        and not v.counted_admission_B
+        and (CUR_TICK - v.last_vax_tick) < 365
+    ))
+    recent_vax_hosp_B <- reduce(nodeset2, [n: node -> int](1), +)
+
+    apply(nodeset1, [v: node]{
+        v.counted_admission_B = True
+    })
+
+    select(nodeset1, [v: node -> bool](v.flu_B.state != H and v.counted_admission_B))
+    apply(nodeset1, [v: node]{
+        v.counted_admission_B = False
+    })
+end
+
+def update_new_hosp_count():
+    update_new_hosp_count_A_H1N1()
+    update_new_hosp_count_A_H3N2()
+    update_new_hosp_count_B()
+    new_hosp_count = new_hosp_count_A_H1N1 + new_hosp_count_A_H3N2 + new_hosp_count_B
+    new_hosp_with_recent_vax_count = recent_vax_hosp_A_H1N1 + recent_vax_hosp_A_H3N2 + recent_vax_hosp_B
+end
+
+def update_susceptible_mass():
+    select(nodeset1, [v: node -> bool](v.flu_A_H1N1.state == S or v.flu_A_H1N1.state == V))
+    susceptible_mass_A_H1N1 <- reduce(nodeset1, [n: node -> float](flu_A_H1N1_susceptibility(n)), +)
+
+    select(nodeset1, [v: node -> bool](v.flu_A_H3N2.state == S or v.flu_A_H3N2.state == V))
+    susceptible_mass_A_H3N2 <- reduce(nodeset1, [n: node -> float](flu_A_H3N2_susceptibility(n)), +)
+
+    select(nodeset1, [v: node -> bool](v.flu_B.state == S or v.flu_B.state == V))
+    susceptible_mass_B <- reduce(nodeset1, [n: node -> float](flu_B_susceptibility(n)), +)
+end
+
+def intervene():
+    if CUR_TICK == 0:
+        init_node_state()
+    end
+
+    update_season_block()
+    seed_contagion()
+    update_seasonality()
+    vaccinate_nodes()
+    update_infection_ticks_A_H1N1()
+    update_infection_ticks_A_H3N2()
+    update_infection_ticks_B()
+    update_new_hosp_count()
+    update_susceptible_mass()
+end

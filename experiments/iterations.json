@@ -1,0 +1,120 @@
+{
+ "_comment": "Calibration iterations, oldest first. id = it<NN> (the order), name = a short label; the report tag is <id>-<name> (flu-round1-2026-27/calib_reports/<tag>.html; calib_reports/index.html lists them all, newest first; latest.html opens the newest with results). experiments are experiments/*.json names or globs. Add a row when a new round of experiments is generated; never renumber an iteration that has runs (it05 and then it06 were the empty production placeholder until 2026-10-27 / 2026-10-28; production is now it07).",
+ "iterations": [
+  {
+   "id": "it01",
+   "name": "generic",
+   "date": "2026-10-19",
+   "experiments": [
+    "bt2023_*"
+   ],
+   "about": "First backtest (fit 2023-24, project 2024-25), generic priors, model v1. Overshot: best runs 5-13x the observed season, peaks 6-8 weeks early, S0 ~0.96."
+  },
+  {
+   "id": "it02",
+   "name": "informed",
+   "date": "2026-10-21",
+   "experiments": [
+    "bt2023i_*"
+   ],
+   "about": "Informed priors from the subtype-season analysis, model v2, long-term immunity (S0 0.62-0.80), staggered seeding, lags off. Lost the spring tail; 2024-25 projection 0.23-0.63x observed and late."
+  },
+  {
+   "id": "it03",
+   "name": "lags-bg",
+   "date": "2026-10-26",
+   "experiments": [
+    "bt2023j_*"
+   ],
+   "about": "Seasonal lags on, off-season background in the likelihood (additive), sampled infection waning, ensemble WIS scoring; 27 searched dimensions. Fit much better, projection too small and late."
+  },
+  {
+   "id": "it04",
+   "name": "reduced",
+   "date": "2026-10-27",
+   "experiments": [
+    "bt2023k_*",
+    "bt2024k_*"
+   ],
+   "about": "Reduced design (7 searched, 10 next-season draws incl. intensity multiplier, the rest fixed), background as a floor, next-season offset 38 d; two backtests: fit 2023-24 -> 2024-25 and fit 2024-25 -> 2025-26."
+  },
+  {
+   "id": "it05",
+   "name": "twostage",
+   "date": "2026-10-27",
+   "experiments": [
+    "bt2023l_*",
+    "bt2024l_*"
+   ],
+   "about": "Two-stage design. Round 1 (these experiments): fit-season parameters only (it04's 7 + the two fit lags, +-8 wk), runs end at the next season's October origin. Round 2 (proj_<exp>/restart, next_season_report.py -> <tag>_next.html): top 5 fits x 32-point Sobol over the next-season parameters (wider intensity and timing, + escape_next drift), restarted from the next season's person file."
+  },
+  {
+   "id": "it06",
+   "name": "subtype-weekly",
+   "date": "2026-10-28",
+   "experiments": [
+    "bt2023m_*",
+    "bt2024m_*"
+   ],
+   "about": "it05's round 1 with one change to the objective: likelihood.subtype_weekly = 0.3 adds the weekly NB of each subtype's admissions against NHSN x lab subtype share, so the fit sees WHEN each subtype peaks (it05's best fits put H3N2 3-10 weeks late in VA/WA and built MA's spring wave from B). Same priors and seeds; warm-started from every it05 run rescored under the new objective, then optimize with looser stopping (it05 stopped after 3 rounds)."
+  },
+  {
+   "id": "it07",
+   "name": "production",
+   "date": "2026-10-28",
+   "experiments": [
+    "prod2025n_*"
+   ],
+   "about": "Production, it06's objective (subtype_weekly 0.3; it06 beat it05 on 5 of 6 backtests, 2026-10-28) and it05's two-stage design: round 1 fits 2025-26 per state (runs to 2026-10-04); round 2 = the projection: candidates (top fits x Sobol over production['next']) screened on the 2026-27 weeks before the hub's cutoff (2026-08-09..10-03) and selected by tempered early-season weights. production['next'] from informed_priors --early-season (early_season.py: H1N1-dominant everywhere, early H1N1 seeding where admissions are ahead of normal)."
+  },
+  {
+   "id": "it08",
+   "name": "age-anchor",
+   "date": "2026-10-29",
+   "experiments": [
+    "prod2025o_*"
+   ],
+   "about": "it07 (prod2025n) with the IHR ladder re-anchored by age (hosp_age_mult_<band>, notebooks/age_anchor.py): the model's contact network puts ~55% of infections at 5-17, so the FluSurv-NET ladder gave 5-17 ~30% of admissions (NHSN 3-5%) and 65+ ~30% (NHSN 56-67%), already in the 2025-26 fits and in the early 2026-27 weeks (WA 65+ 120 vs 291). Multiplier = NHSN share / model share per state (2024-25 + 2025-26, shrunk), all-age admissions kept. Same seeds as prod2025n: round 1 re-runs the same points. Production is now it08."
+  },
+  {
+   "id": "it09",
+   "name": "early-rise",
+   "date": "2026-11-02",
+   "experiments": [
+    "slopex_FL",
+    "seedx_FL",
+    "seedx2_*",
+    "seedx3_FL"
+   ],
+   "about": "Early-season tests for the states whose 2026-27 season rose in September (FL first, then HI WA FL LA MT CA AL TN UT): a growth term in the early score (slopex), an H1N1 seeding pulse in model v3 (seedx, seedx2 = prod2025o + pulse), recent-weeks weighting with wider pulse priors (seedx3_FL). seedx2 replaced prod2025o for FL(seedx3) CA WA LA MT AL TN UT in prod-60 / prod-60-v2 (the round 1 submission, hub PR #57)."
+  },
+  {
+   "id": "it10",
+   "name": "v4-vaccine",
+   "date": "2026-11-05",
+   "experiments": [
+    "prodv3_*",
+    "prodv3g_*"
+   ],
+   "about": "Model v4 (vax_escape_per_day 1, vax_infection_ve 0.43, vax_symp_ve 0.46, vax_hosp_ve 0 -> realized VE ~23% inf / ~49% symptomatic / ~52% hosp) on prod-60-v2's members with tau_mult 1.16 and hosp_prob_scale x1.08, NOT recalibrated (scripts/proj/make_prodv3.py). prodv3g = the same runs with the size + Nov-1 peak guard re-applied (--guarded). No calibration of their own: calib_<exp> entries are symlinks to the base."
+  },
+  {
+   "id": "it11",
+   "name": "v4-recalib",
+   "date": "2026-11-05",
+   "experiments": [
+    "prodv4_*"
+   ],
+   "about": "Full recalibration under model v4 for VA MA WA FL (make_prodv3.py --recalib + state_pipeline.py). Judged too damped; not used."
+  },
+  {
+   "id": "it12",
+   "name": "v5-topup",
+   "date": "2026-11-06",
+   "experiments": [
+    "prodv5_*"
+   ],
+   "about": "prodv3g topped up to >= 45 runs per state by resampling surviving members (scripts/proj/v5_pipeline.py; restart/base.csv = the v3g kept, restart/v5_draws.csv = new draws). The Nov 2026 update of the round 1 submission (branch UVA-escape_flu-2026-10-04-v5)."
+  }
+ ]
+}
