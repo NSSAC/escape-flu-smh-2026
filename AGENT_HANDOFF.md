@@ -1,22 +1,27 @@
-# Agent handoff: escape-flu-smh (SMH Flu Round 1 2026-27)
+# Agent handoff: the ESCAPE flu model and pipeline
 
-Context for an agent continuing this work or starting the next flu round. Read [README.md](README.md) first for the
-layout. This file adds what the code does not say: the history, why decisions went the way they did, pitfalls, the
-owner's working rules, and open items. [docs/flu.md](docs/flu.md) is the long notebook through prod-60-v2
-(2026-11-05). This file covers everything after that. Written 2026-11-12.
+Context for an agent continuing this work or starting a new study with it: a later SMH round, an in-season
+forecast, a vaccine-policy question or a retrospective. The first study was the Scenario Modeling Hub's Flu Round
+1 2026-27, so the history and examples below come from it.
+
+Read [README.md](README.md) and the pipeline's `README.md` and `docs/studies.md` first for the layout and the
+study concept. This file adds what the code does not say: the history, why decisions went the way they did,
+pitfalls, the owner's working rules, and open items. [docs/flu.md](docs/flu.md) is the long notebook through
+prod-60-v2 (2026-11-05). [docs/vaccine.md](docs/vaccine.md) covers the vaccine retune. Written 2026-11-12.
 
 ## 1. Where things are
 
 | what | where |
 |---|---|
 | this repo (model + drivers) | `/project/bii_nssac/biocomplexity/SMH/escape-flu-smh` (on GPFS: `/sfs/gpfs/tardis/project/...`) |
-| workspace (data, analysis code, submission, all outputs) | `/project/bii_nssac/biocomplexity/SMH/flu-round1-2026-27`. **Not in git** (§7). Its `README.md` covers the initial-conditions pipeline |
+| this repo on GitHub | `git@github.com:NSSAC/escape-flu-smh-2026.git`, branch `main` |
+| pipeline (data, analysis code, SMH export, all outputs) | `/project/bii_nssac/biocomplexity/SMH/flu-round1-2026-27`, its own git repo from 2026-11-12. Outputs are not tracked. Docs: `README.md`, `docs/studies.md`, `docs/smh.md`, `docs/initial-conditions.md` |
 | hub clone the fits read | `flu-round1-2026-27/external/flu-scenario-modeling-hub`. **Do not pull it**: the fits must see the data as of the cutoff. Use `git fetch` + `git show origin/main:<path>` for newer files |
 | hub resources | `external/flu-scenario-modeling-hub_resources` (`Rd7_datasets/`: coverage curves, CDC cumulative deaths) |
 | hub PR checkout | `flu-round1-2026-27/submission/hub-pr` (sparse, blobless; managed by `submission/prepare_hub_pr.sh`) |
 | scratch | `/scratch/$USER/flu-round1-2026-27/`: `calib/` (builds, input.h5), `sw/` (pilot-job scripts and logs, `sw/drivers/`), `ve/` (VE re-simulations), `detailed/` (sbatch + logs). **Scratch is purged**: nothing there is the only copy of a result, but the builds would have to be redone |
 | Python | `module load gcc/14.2.0; eval "$($HOME/conda/bin/conda shell.bash hook)"; conda activate escape-sw` |
-| R (hub validation) | `/scratch/bl4zc/envs/hubval` (hubValidations + SMHvalidation) for `submission/validate_hub.R`. On scratch, so it can be purged: rebuild it if it is missing |
+| R (hub validation) | `$HUBVAL_ENV`, default `/scratch/$USER/envs/hubval` (hubValidations + SMHvalidation) for `submission/validate_hub.R`. On scratch, so it can be purged: rebuild with `submission/envs/hubval_env.sh` |
 | simulator | `escape_abm` (OpenMP) in `escape-sw`. A run is ~1.5 min per million people on a 40-core node. Pilot peak RSS ~63 GB (VA) |
 
 ## 2. Working with the owner
@@ -92,7 +97,7 @@ Oct 31):
 - **US = index-pairing sum of states.** Because the state ensembles are skewed, the US median comes out ~1.6x
   observed for every version, while the sum of state medians is ~1.0-1.1x. This is a known artifact, not a bug.
 
-## 5. Running a round end to end (what this round actually ran)
+## 5. Running a study end to end (as Round 1 2026-27 ran it)
 
 Run from `escape-flu-smh/` unless a step says otherwise. Notebooks live in `../flu-round1-2026-27/notebooks/`.
 
@@ -160,15 +165,22 @@ Run from `escape-flu-smh/` unless a step says otherwise. Notebooks live in `../f
 ## 7. Open items and loose threads
 
 **Repository / housekeeping**
-- **The workspace's code is not versioned.** That is `flu-round1-2026-27/notebooks/*.py`, `submission/*.sh|*.py|*.R`,
-  the drafts, and `scripts/`. It holds the submission builder, every analysis, and the IC pipeline. Suggested:
-  a workspace repo like `NSSAC/smh-cryptic-round`, ignoring `data/`, `calib_*/`, `proj_*/`, `analysis/`,
-  `external/`, `submission/hub-pr/`, `logs/`, and `*.h5` / `*.parquet`.
-- `docs/flu.md` "Still to do" is an October snapshot. `make_prodv3.py` refers to a "Realized VE" section of
-  docs/flu.md that was never written. The VE work is summarized in §4 here and in the docstrings of
-  `notebooks/ve_runs.py` and `ve_analysis.py`.
-- The top-level `scripts/*.py` and `py-modules/escape_covid19_smh/` are Round 20 leftovers with other users' paths.
-  Move them to `legacy/` or delete them.
+- Done 2026-11-12:
+  - the pipeline got its own repo and docs;
+  - Round 20 leftovers moved to `legacy/`;
+  - `docs/vaccine.md` written;
+  - `/scratch/bl4zc` paths replaced with `$USER` / `%u`;
+  - the hub-validation env rebuild recorded in `submission/envs/hubval_env.sh`, which has not been re-run.
+- **Study constants are still scattered.** Dates, scenario letters and the D reference sit in several files
+  (pipeline `docs/studies.md`, "Still hard-coded"). Reading them from the experiment's `production` block would
+  make a new study a config change.
+- **A study's outputs live inside a checkout of the pipeline repo** (`FLU_ROUND`). Separating code from study
+  directories would let one checkout serve many studies.
+- **The analyses assume scenarios A-D with D = no vaccination.** Generalize them to any scenario set with a
+  named reference.
+- **The fitting data come from the hub clone's target data.** A hub-independent NHSN snapshot loader (CDC
+  `ua7e-t2fy`, cut at `data_end`, saved with its retrieval date) is needed for studies outside SMH.
+- `docs/flu.md` "Still to do" is an October snapshot, superseded by this list.
 
 **Model / method (for the next round)**
 1. **Recalibrate under the v4 vaccine instead of rescaling.** v3 is a uniform tau/hosp rescale: it fixes size,
@@ -193,18 +205,23 @@ Run from `escape-flu-smh/` unless a step says otherwise. Notebooks live in `../f
 - The detailed-analysis selection can be extended to other states:
   `detailed_analyses.py pick <name> prodv5_<ST> --quantiles 0.25 0.5 0.75 --replicates 10`.
 
-## 8. Starting the next round (checklist)
+## 8. Starting a new study (a later SMH round or anything else)
 
-1. **New workspace.** Copy the pattern of `flu-round1-2026-27/`: `external/` via `scripts/fetch_external.sh`, and
-   `flu_data.py` with the new `ANCHOR`, `CALIB_END` and `COVERAGE`. Read the hub README first; it superseded the
-   PDF this round (dates and coverage seasons changed).
-2. **Point the drivers at it.** Set `FLU_ROUND` and `FLU_SCRATCH`, or change the defaults in
-   `flu_smh/experiment.py`. Search for hard-coded dates: `2026-10-03`, `2026-10-04`, `2026-08-09`,
-   `2026-11-01` (`upscale.py`, `v5_pipeline.py`, `state_pipeline.py` defaults, `production` blocks in the experiment
-   JSONs). `grep -rn "2026-1[01]-0\|2026-08-09"` finds them.
-3. **New model version** (`flu-r<k>-...esl`), starting from v4. Keep the old ones unchanged.
-4. **Person files** at the new anchors, then the experiments (new family names), then the `iterations.json` rows.
+The full checklist is in the pipeline's `docs/studies.md`. In short:
+
+1. **Directory.** Make a new checkout of the pipeline repo for the study's outputs, and `export FLU_ROUND=<it>`.
+   Fetch `external/` if the study uses hub data or coverage curves.
+2. **Calendar, campaigns, scenarios.**
+   - In `flu_data.py`: `ANCHOR`, `CALIB_END`, `PROJ_START/END`, `COVERAGE`.
+   - In each experiment: the `production` block (`origin`, `data_end`, `scenarios`, `restart_anchor`).
+   - Then the remaining hard-coded constants listed in `docs/studies.md`.
+   - For an SMH round, read the hub README first. This round it superseded the PDF (dates and coverage seasons
+     changed).
+3. **Model.** Start from v4 in a new version file (`flu-r<k>-...esl`), and keep the old ones unchanged.
+4. **Inputs.** Person files at the new anchors, then the experiments (new family names), then the
+   `iterations.json` rows.
 5. **Backtest the changes first.** Use at least two seasons (as it04-it06) on 3 states (VA, WA, MA) before
-   production on all 50.
-6. **Submission.** Copy `submission/v5-update/` into a new drafts folder. Update `model-metadata` and the abstract,
-   then run the build script with `PREFIX`, `TAG`, `DRAFTS` and `BRANCH`.
+   running all 50.
+6. **Outputs.** The native outputs and analyses need no export. For SMH, follow the pipeline's `docs/smh.md`: copy
+   `submission/v5-update/` to a new drafts folder, then run the build script with `PREFIX`, `TAG`, `DRAFTS` and
+   `BRANCH`.

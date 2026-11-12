@@ -6,7 +6,7 @@ hospitalization rescaled instead of recalibrated (2026-11-05; tag prod-v3, a tes
     python scripts/proj/flu_proj.py submit run prodv3_FL prodv3_VA prodv3_WA prodv3_MA --mode restart --selected \\
         --qos bii-half --jobs 50 --extra-partition bii-largemem --extra-jobs 40
 
-What changes (flu-round1-2026-27/notebooks/ve_runs.py, ve_analysis.py; docs/flu.md "Realized VE"):
+What changes (flu-round1-2026-27/notebooks/ve_runs.py, ve_analysis.py; docs/vaccine.md):
   model   flu-r1-2026-27-v4.esl (v3 + vax_escape_per_day, vax_symp_ve; v2/v3 behaviour by default)
   vaccine vax_escape_per_day 1 (no escape: the hub's 50% holds whatever the match), vax_infection_ve 0.43,
           vax_symp_ve 0.46, vax_hosp_ve 0 -> realized (matched cohort, VA B) ~23% infection, ~49% symptomatic,
