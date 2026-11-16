@@ -39,11 +39,17 @@ Fields
   likelihood             {"nb_size": k, "subtype_weight": w, "subtype_neff": n} (+ background, background_mode,
                          optional week_weight; see calib.py LIKELIHOOD)
   keep_h5                keep each run's raw HDF5 (large) or delete it after extraction
+  root, scratch          optional: the study directory this experiment's outputs (calib_<name>, proj_<name>) and
+                         relative person files live under, and the scratch directory of its builds. Default:
+                         FLU_ROUND / FLU_SCRATCH from the environment. Set by studies other than Round 1, so a
+                         worker started without the study's environment still writes into the right tree
+                         (${USER} etc. are expanded)
   production             hub projections from this calibration (flu_smh/proj.py), or {} for a backtest:
                            season          the campaign the scenarios replace ("2026-27")
                            origin          hub origin_date, the first projected day; S0 is read here
                            scenarios       {scenario_id: flu_data.COVERAGE key, or null for no campaign}
                            restart_anchor, restart_person_file
+                           screen_end      optional: the last day of a mode-"screen" run (default origin + 7 d)
                                            mode "restart": a single-season run from this tick 0 and person
                                            file (history to the anchor) instead of the continuous run
 """
@@ -96,6 +102,8 @@ class Experiment:
     draws: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
     production: dict = field(default_factory=dict)
+    root: str | None = None
+    scratch: str | None = None
 
     # --- derived ---------------------------------------------------------------------------
     @property
@@ -117,9 +125,14 @@ class Experiment:
         return float(self.tick(self.season_break)) if self.season_break else 1e9
 
     @property
+    def home(self) -> Path:
+        """The study directory: `root` if the experiment names one, else FLU_ROUND."""
+        return Path(os.path.expandvars(self.root)) if self.root else FLU_ROUND
+
+    @property
     def person_path(self) -> Path:
         p = Path(self.person_file)
-        return p if p.is_absolute() else FLU_ROUND / p
+        return p if p.is_absolute() else self.home / p
 
     @property
     def network_path(self) -> Path:
@@ -133,12 +146,12 @@ class Experiment:
     @property
     def out_dir(self) -> Path:
         """Small results (particles, weekly tables, scores) -- under flu-round1-2026-27/calib_<name>."""
-        return FLU_ROUND / f"calib_{self.name}"
+        return self.home / f"calib_{self.name}"
 
     @property
     def work_dir(self) -> Path:
         """Build and input.h5 (large) -- on scratch."""
-        return SCRATCH / self.name
+        return (Path(os.path.expandvars(self.scratch)) if self.scratch else SCRATCH) / self.name
 
     def base_configs(self) -> dict:
         """Configs every particle shares: the fixed values plus the experiment's calendar."""

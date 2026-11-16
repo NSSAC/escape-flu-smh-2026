@@ -205,6 +205,14 @@ Run from `escape-flu-smh/` unless a step says otherwise. Notebooks live in `../f
 - The detailed-analysis selection can be extended to other states:
   `detailed_analyses.py pick <name> prodv5_<ST> --quantiles 0.25 0.5 0.75 --replicates 10`.
 
+## 7b. In-season forecasting study (from 2026-11-16)
+
+`flu-forecasting-FluTURE-2026-27/` (a checkout of the pipeline on branch `flu-forecasting-2026-27`, `study.json`
+at its root) forecasts NHSN admissions weekly for VA, MA and WA from pools of finished restart runs (particles)
+re-weighted per forecast date: `flu_smh/forecast.py`, `scripts/forecast/fc.py`, experiments `fc2627_*` (it13).
+Read that study's `docs/forecasting.md` first. Always `source <study>/env.sh` (fc.py refuses to run otherwise);
+experiments carry `root`/`scratch`, so their outputs land in the study, not in flu-round1-2026-27.
+
 ## 8. Starting a new study (a later SMH round or anything else)
 
 The full checklist is in the pipeline's `docs/studies.md`. In short:

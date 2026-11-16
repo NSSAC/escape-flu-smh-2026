@@ -35,6 +35,7 @@ and build under `FLU_SCRATCH`, which defaults to `/scratch/$USER/flu-round1-2026
 | `models/vscode-esl/` | VS Code syntax highlighting for ESL |
 | `py-modules/flu_smh/` | `experiment.py` (experiment JSON, paths, iteration registry), `schedule.py` (vaccination schedules), `sim.py` (build, run, extract), `calib.py` (priors, draws, NHSN likelihood, scoring), `sw.py` (slurm-workflows objective), `proj.py` (members, restart mode, screen, early selection, guards, top-ups), `upscale.py` (severity and death replicates, all-deaths scaling) |
 | `scripts/calib/` | `sw_calib.py` (multi-location explore and optimize on pilot jobs), `seed_from.py`, `flu_calib.py` (the first single-node driver) |
+| `scripts/forecast/` | in-season forecasting: `fc.py` (snapshot, forecast, backtest, score, prescreen, weekly), `make_fc_experiments.py`, `pool.sbatch`; the study is flu-forecasting-FluTURE-2026-27 (`docs/forecasting.md` there) |
 | `scripts/proj/` | `flu_proj.py` (members, run, select), `state_pipeline.py` (per-location chain from prepare to analysis), `make_seedx.py`, `make_prodv3.py` (v3, v3g, v4), `v5_pipeline.py` (top-up), sbatch wrappers |
 | `experiments/` | one JSON per experiment (`<family>_<ST>.json`) and `iterations.json`, the registry of experiment families (it01-it12) used for report tags |
 | `docs/flu.md` | model and calibration notes, iteration by iteration, through the round 1 submission |

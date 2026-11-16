@@ -115,6 +115,15 @@
     "prodv5_*"
    ],
    "about": "prodv3g topped up to >= 45 runs per state by resampling surviving members (scripts/proj/v5_pipeline.py; restart/base.csv = the v3g kept, restart/v5_draws.csv = new draws). The Nov 2026 update of the round 1 submission (branch UVA-escape_flu-2026-10-04-v5)."
+  },
+  {
+   "id": "it13",
+   "name": "forecast",
+   "date": "2026-11-16",
+   "experiments": [
+    "fc2627_*"
+   ],
+   "about": "In-season forecasting study flu-forecasting-FluTURE-2026-27 (VA MA WA): particle pool p01 = prodv3's 16 best 2025-26 fits x 64 Sobol next-season points (tau_next_mult 0.4-1.6, next-season peak up to 4 wk later), scenario B, restart runs to 2027-05-01, screened loosely on NHSN to 2026-10-24. Forecasts re-weight the pool each week (flu_smh/forecast.py, scripts/forecast/fc.py); outputs in that study directory, not calib_reports."
   }
  ]
 }

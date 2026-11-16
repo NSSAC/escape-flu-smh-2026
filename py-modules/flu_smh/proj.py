@@ -74,7 +74,7 @@ ABS_TICKS = ["seas_peak_tick", "seas_peak_tick_next", *[f"seed_start_{s}" for s 
 
 
 def out_dir(exp: Experiment) -> Path:
-    return FLU_ROUND / f"proj_{exp.name}"
+    return exp.home / f"proj_{exp.name}"
 
 
 def scenario_ids(exp: Experiment) -> list[str]:
@@ -100,7 +100,7 @@ def scenario_experiment(exp: Experiment, sid: str, mode: str = "restart") -> Exp
     kw = dict(name=f"{exp.name}-{mode}-{sid.split('-')[0]}", campaigns=camps)
     if mode in RESTARTS:
         end = prod.get("end", exp.end) if mode == "restart" else \
-            str((pd.Timestamp(prod["origin"]) + pd.Timedelta(days=7)).date())
+            prod.get("screen_end") or str((pd.Timestamp(prod["origin"]) + pd.Timedelta(days=7)).date())
         kw |= dict(anchor=prod["restart_anchor"], person_file=prod["restart_person_file"],
                    season_break=prod["restart_anchor"], end=end)
     elif mode != "continuous":
